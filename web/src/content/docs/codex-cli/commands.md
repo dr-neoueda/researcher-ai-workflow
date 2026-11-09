@@ -231,7 +231,7 @@ Codex で利用可能な Commands は `/` を入力すると候補一覧が表�
 
 ## raw プラグインに Commands を追加するべきか？
 
-現状の raw（v1.0.0 / v1.1.0）は Skills のみで Commands は無い設計。これは Codex 流の「やりたいことを述べれば発火」UX を尊重した結果。
+現状の raw（Codex 版）は Skills のみで Commands は無い設計。これは Codex 流の「やりたいことを述べれば発火」UX を尊重した結果。
 
 将来 Commands を追加する場合の候補：
 

@@ -87,4 +87,4 @@ Codex CLI ではスラッシュ不要。`raw` と入力するか、「研究プ�
 
 ## ステータス
 
-**raw v1.0.0（2026-05-13）公開済み**：マーケットプレイス（`dr-neoueda/researcher-ai-workflow`）経由で導入可能。Claude Code 版（`/raw`）と内容は基本同一で、AGENTS.md ターゲットに対応。
+**公開済み**（2026-05-13 に旧名 caw の v1.0.0 として公開、2026-11-06 の v2.0.0 で raw へ改名）：マーケットプレイス（`dr-neoueda/researcher-ai-workflow`）経由で導入可能。Claude Code 版（`/raw`）と内容は基本同一で、AGENTS.md ターゲットに対応。
