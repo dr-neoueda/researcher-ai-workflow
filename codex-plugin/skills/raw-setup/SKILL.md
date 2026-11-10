@@ -94,6 +94,10 @@ python -c "import numpy, pandas, scipy, matplotlib; print('analysis deps OK')"
 導入済み / 今回入れた / 失敗 / 任意で見送り、を表で報告。最後に「`work/gaussian/_past-data/` 等に
 過去データを入れて『取り込んで』と言うと Playbook を最適化できます」と次の一歩を添える。
 
+**hook の承認（Codex）**：raw の自動の仕組み（起動時の読み込み・置き場所の見張り・学びの催促）は、Codex では
+ユーザーが `/hooks` で信頼（trust）するまで動かない。報告の最後に「まだなら `/hooks` で raw の 3 つを信頼にしてください。
+プラグインを更新したときも確認が出ます」と添える。hook は Python を使うので、Python が無いと置き場所の見張りは働かない。
+
 ## 重要な注意事項
 
 - **対応 OS は macOS と Windows**。Windows の raw Hooks は bash なので Git Bash / WSL2 が要る点も伝える

@@ -2,6 +2,20 @@
 
 本ファイルは [Keep a Changelog](https://keepachangelog.com/) と [Semantic Versioning](https://semver.org/) に準拠。
 
+## [2.2.0 / Codex 2.2.0] - 2026-11-10
+
+### Added — Codex 版に hook を同梱
+
+- Codex 版にも Claude Code 版と同じ 3 つの hook（起動時の読み込み・成果物の置き場所の見張り・学びの催促）を入れた。`hooks/` は両版で同じファイル（check-consistency がバイト一致を見る）
+- Codex では、ユーザーが `/hooks` で信頼するまで hook は動かない。オンボーディングの完了メッセージ・`raw-setup`・Codex 版 README で案内する
+
+### Fixed — hook の文が Claude に届いていなかった
+
+- 置き場所の警告（PostToolUse）と学びの催促（Stop）は、標準出力に書いて終了コード 0 で返していた。Claude Code ではこの形の文は Claude に届かない（デバッグのログに行くだけ）。標準エラー＋終了コード 2 に直した（Codex も同じ形で受け取る）。学びの催促は `stop_hook_active` を見て 1 回だけにした
+- 入力の JSON を jq で読んでいた（jq が無い環境では置き場所の見張りが何もしなかった）。同梱の `_hookio.py`（Python）で読む。Codex の `apply_patch` のパッチから書き込み先を読む
+- プロジェクトの場所を、JSON の `cwd` から上へたどって探す（Codex には `CLAUDE_PROJECT_DIR` が無い。サブフォルダで起動しても見つかる）
+- macOS の bash 3.2 で、日本語の直前の変数（`$today）`）が文字化けしていた
+
 ## [2.1.0 / Codex 2.1.0] - 2026-11-10
 
 ### Added — 原稿とスライドの数値の照合

@@ -1,17 +1,17 @@
 #!/bin/bash
-# SessionStart hook (raw plugin)
-# カレントプロジェクトの office/ を検出し、直近の secretary/notes と
-# computation/playbooks/ をコンテキストに注入する。
+# SessionStart hook (raw plugin) — Claude Code と Codex CLI の両方で動く
+# プロジェクトの office/ を見つけ（今の場所から上へたどる）、直近の secretary/notes・
+# computation/playbooks の一覧・今日の TODO をコンテキストに入れる。
+# SessionStart は標準出力がそのまま Claude / Codex に届く（両 CLI の仕様）。
 # ユーザー個人パスをハードコードしない（プラグイン配布版）。
 
-set -euo pipefail
-cat > /dev/null  # Claude Code から渡される JSON を読み捨て
+set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
+hook_read_input
 
-# Claude Code が CLAUDE_PROJECT_DIR を提供する。未定義なら cwd フォールバック。
-project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+project_dir="$(hook_project)"
+[ -n "$project_dir" ] || exit 0
 company_dir="$project_dir/office"
-
-[ -d "$company_dir" ] || exit 0
 
 sec_dir="$company_dir/secretary/notes"
 playbooks_dir="$company_dir/computation/playbooks"
@@ -26,7 +26,6 @@ EOF
 
 if [ -d "$sec_dir" ]; then
     # mtime 降順で直近 3 件。ls -t は macOS / Linux / WSL / Git Bash 共通（POSIX）。
-    # BSD 専用の `stat -f` / GNU 専用の `stat -c` を避ける。
     files=$(ls -t "$sec_dir"/*-decisions.md "$sec_dir"/*-learnings.md 2>/dev/null | head -3)
     if [ -n "$files" ]; then
         echo "### 直近の意思決定・学び（mtime 上位 3 件・各 30 行）"
@@ -46,7 +45,7 @@ fi
 if [ -d "$playbooks_dir" ]; then
     pb_files=$(find "$playbooks_dir" -maxdepth 1 -type f -name "*.md" 2>/dev/null | sort)
     if [ -n "$pb_files" ]; then
-        echo "### 利用可能な Playbook（必要に応じて Read tool で全文ロード）"
+        echo "### 利用可能な Playbook（必要に応じて全文を読む）"
         echo ""
         while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -59,8 +58,9 @@ fi
 today=$(date +%F)
 todo_file="$company_dir/secretary/todos/$today.md"
 if [ -s "$todo_file" ]; then
-    echo "### 今日の TODO（$today）"
+    echo "### 今日の TODO（${today}）"
     echo ""
     head -30 "$todo_file"
     echo ""
 fi
+exit 0
