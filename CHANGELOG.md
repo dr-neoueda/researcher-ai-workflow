@@ -2,6 +2,22 @@
 
 本ファイルは [Keep a Changelog](https://keepachangelog.com/) と [Semantic Versioning](https://semver.org/) に準拠。
 
+## [2.3.0 / Codex 2.3.0] - 2026-11-10
+
+### Added — 計算の見張りを既定にする（スキルにしない）
+
+- 裏で走らせる計算と HPC のジョブには、投入したらユーザーに頼まれなくても必ず見張りを付け、完走まで見る（`office/` の決まり「計算の見張り」・計算管理部・`raw-input` の Step 8。起動時の hook も決まりの要点を文脈に入れる）
+- `hooks/jobwatch.py`：`register`（登録）・`ensure-watcher`（セッションを閉じても続く見張りを tmux で起動。無ければ切り離して）・`wait`（Claude Code はこれを裏で走らせ、終わったら再開する）・`judge`（ログの完走の印の数・異常の印・できるはずのファイルで判定。終了コードでは決めない）・`status`・`pending`
+- 完走の印は `--tool` で決まる（Gaussian・ORCA・CP2K・GROMACS・Quantum ESPRESSO・VASP・LAMMPS）。ほかは `--done` で指定
+- ローカルはプロセス、PBS は qstat、SLURM は squeue で確かめる（`--host` で ssh 越し）。ssh が通らないときは「不明」として残す
+- 終わると OS の通知を出し、Codex で登録したジョブは `codex queue` でそのセッションに伝える
+- hook：発言時（UserPromptSubmit）に判定待ちのジョブを知らせる。終わる前（Stop）に、判定待ち・見張りの無いジョブがあれば引き戻す
+- Claude Code の実機（`claude -p`）で、「計算を 1 本投入して」とだけ頼むと、登録・見張り・待機・判定・ジョブ記録と Playbook への反映・次の投入の判断まで進むことを確かめた
+
+### Fixed
+
+- `raw-input` に残っていた作者の memory の参照を、一般の例に直した
+
 ## [2.2.0 / Codex 2.2.0] - 2026-11-10
 
 ### Added — Codex 版に hook を同梱

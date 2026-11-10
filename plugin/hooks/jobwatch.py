@@ -417,6 +417,16 @@ def ensure_watcher(project: Path, launch: Launch | None = None) -> str:
     return "detached"
 
 
+def wait_for_heartbeat(project: Path, timeout: float = 5.0) -> bool:
+    """起動した見張りが心拍を書くまで待つ（起動直後に「止まっている」と見えないように）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _watcher_alive(project):
+            return True
+        time.sleep(0.2)
+    return _watcher_alive(project)
+
+
 def _project_arg(value: str | None) -> Path:
     if value:
         return Path(value).resolve()
@@ -509,7 +519,12 @@ def main(argv: list[str] | None = None) -> int:
             watch(project, a.interval)
             return 0
         if a.command == "ensure-watcher":
-            print(f"見張り: {ensure_watcher(project)}")
+            how = ensure_watcher(project)
+            if how != "already" and not wait_for_heartbeat(project):
+                print(f"見張りを起動しましたが（{how}）、5 秒たっても心拍がありません。status で確かめてください", file=sys.stderr)
+                return 1
+            print(f"見張り: {'すでに動いている' if how == 'already' else f'起動した（{how}）'}"
+                  f"。{DEFAULT_INTERVAL:.0f} 秒おきに確かめる")
             return 0
         if a.command == "pending":
             text = pending_text(project)

@@ -8,8 +8,8 @@
 
 | 項目 | 値 |
 |---|---|
-| **配布版** | plugin **2.2.0** / codex 2.2.0 / copilot 1.46.0（**保留中**・旧名 caw）/ gemini 1.49.0（凍結） |
-| **直近の作業** | v2.1 系：研究側の更新を 4 本の PR で進めている（2026-11-10 承認）。PR 1＝測定データの置き場の統一・確かめ方の決まり 6 行・数値の照合（`check_numbers.py`）。続き：PR 2＝Codex 版に hook → PR 3＝計算の見張りを既定に（`jobwatch`）→ PR 4＝`raw-ask`（登録論文から答え、無ければ Web で URL つき）。**就活トラックは v2.0.1 で開発終了**（2026-11-10 ユーザー決定。削除はしない） |
+| **配布版** | plugin **2.3.0** / codex 2.3.0 / copilot 1.46.0（**保留中**・旧名 caw）/ gemini 1.49.0（凍結） |
+| **直近の作業** | v2.1〜2.3：研究側の更新を 4 本の PR で進めている（2026-11-10 承認）。PR 1（v2.1.0）＝測定データの置き場の統一・確かめ方の決まり 6 行・数値の照合 `check_numbers.py`。PR 2（v2.2.0）＝Codex 版に hook・hook の文が Claude に届いていなかった不具合の修正。PR 3（v2.3.0）＝計算の見張りを既定に（`hooks/jobwatch.py`）。残り：PR 4＝`raw-ask`（登録論文から答え、無ければ Web で URL つき）。**就活トラックは v2.0.1 で開発終了**（2026-11-10 ユーザー決定。削除はしない） |
 | テスト | `plugin/skills` 全体で 514 passed（scaffold 77・check_numbers 236） |
 | 配布元 | https://github.com/dr-neoueda/researcher-ai-workflow（2026-11-06 に `chemist-ai-workflow` から改名。旧 URL は GitHub が転送） |
 

@@ -79,15 +79,19 @@ your-research-project/
 
 ## 自動の仕組み（hook）
 
-Claude Code 版と同じ 3 つの hook を同梱している（`hooks/`、Claude Code 版と同じファイル）。
+Claude Code 版と同じ hook を同梱している（`hooks/`、Claude Code 版と同じファイル）。
 
 | いつ | 何をするか |
 |---|---|
-| 起動したとき | 直近の決定・学び、Playbook の一覧、今日の TODO を読み込む |
+| 起動したとき | 直近の決定・学び、Playbook の一覧、今日の TODO、計算の見張りの決まりと道具を読み込む |
+| 発言したとき | 終わったのに判定していない計算ジョブがあれば知らせる |
 | ファイルを書いたとき | 成果物を `office/` の中に書いたら、`work/` へ移すよう伝える |
-| 終わる前 | 今日の活動があるのに学びのノートが無ければ、書くよう引き戻す（1 回だけ） |
+| 終わる前 | 学びのノートが無ければ書くよう、判定待ち・見張りの無い計算ジョブがあれば片付けるよう引き戻す（1 回だけ） |
 
-**Codex では最初に承認が要る。** インストールしたら Codex で `/hooks` と入力し、raw の 3 つを「信頼（trust）」にする。
+**計算の見張り**：投入した計算は `hooks/jobwatch.py` に登録され、見張り（tmux）がセッションを閉じても完走まで見る。
+終わると、OS の通知と、登録したときの Codex のセッションへの伝言（`codex queue`）で知らせる。
+
+**Codex では最初に承認が要る。** インストールしたら Codex で `/hooks` と入力し、raw の hook をすべて「信頼（trust）」にする。
 プラグインを更新して中身が変わったときも、もう一度確認が出る。承認するまで hook は動かない（エラーにもならない）。
 置き場所の見張りは Python を使う（`raw-setup` が入れる）。
 
@@ -100,7 +104,7 @@ Claude Code 版と同じ 3 つの hook を同梱している（`hooks/`、Claude
 | 生成される指示ファイル | `<dept>/CLAUDE.md` | `<dept>/AGENTS.md` |
 | インストール | `/plugin install raw@researcher-ai-workflow` | `codex plugin install raw` |
 | スキル本体（プロンプト指示） | 同一 | 同一 |
-| hook（3 つ） | 同一。入れると動く | 同一。`/hooks` で承認してから動く |
+| hook（起動時・発言時・ファイルを書いたとき・終わる前） | 同一。入れると動く | 同一。`/hooks` で承認してから動く |
 | Playbook 雛形 | 同一 | 同一 |
 
 両プラグインは同じリポジトリ（`dr-neoueda/researcher-ai-workflow`）から並列配信。研究室で Claude Code 派と Codex CLI 派が混在しても、同じ `office/` メソッドを共有できる。
