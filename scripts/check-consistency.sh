@@ -78,6 +78,8 @@ mirror_dirs=(
   "skills/raw-analyze/references"
   "skills/raw-write/scripts"
   "skills/raw-write/tests"
+  "skills/raw-ask/scripts"
+  "skills/raw-ask/tests"
   "hooks"
 )
 for d in "${mirror_dirs[@]}"; do

@@ -2,6 +2,15 @@
 
 本ファイルは [Keep a Changelog](https://keepachangelog.com/) と [Semantic Versioning](https://semver.org/) に準拠。
 
+## [2.4.0 / Codex 2.4.0] - 2026-11-10
+
+### Added — `raw-ask`：登録済みの論文から答える（無ければ Web で URL つき）
+
+- 研究の質問（先行研究・文献値・手法・機構・「〜って何？」）に、まず登録済みの論文（`work/papers/md`）を根拠に答える。スキルの名前を知らなくても使えるよう、`office/` の決まり「研究の質問への答え方」・文献部・秘書の振り分けにも書いた
+- `raw-ask/scripts/search_library.py`：要約の題名・タグ・節を BM25 で検索する（標準ライブラリだけ）。日本語は 2 文字ずつ、英語は単語で数え、日本語と英語の言い換えを複数まとめて投げられる。登録済みの本数を数えて出す（「N 本には見当たらない」と言えるように）
+- 登録済みの論文に無ければ、論文のデータベース（OpenAlex・Crossref・Semantic Scholar・arXiv・PubMed）と一般の Web 検索で探し、**主張ごとに出どころの URL を付けて「（Paper DB 未登録）」と書く**。答えは `work/topics/qa/` に残し、役に立った論文は登録を提案する（答えるほど Paper DB が育つ）
+- Codex 版の `raw-setup` は、最新の情報を探せるよう `web_search = "live"` にするかを尋ねる（既定の `"cached"` は OpenAI の索引を引くだけ）
+
 ## [2.3.0 / Codex 2.3.0] - 2026-11-10
 
 ### Added — 計算の見張りを既定にする（スキルにしない）

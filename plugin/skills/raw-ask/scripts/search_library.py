@@ -19,6 +19,7 @@ import math
 import re
 import sys
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,7 +146,8 @@ class _Chunk:
     paper_index: int
     section: str
     text: str
-    tokens: tuple[str, ...]
+    counts: Counter
+    length: int
     weight: float
 
 
@@ -153,24 +155,26 @@ def _chunks(papers: list[Paper]) -> list[_Chunk]:
     chunks = []
     for i, paper in enumerate(papers):
         head = " ".join([paper.title, *paper.tags])
-        chunks.append(_Chunk(i, "題名・タグ", head, tuple(tokenize(head)), TITLE_WEIGHT))
+        head_tokens = tokenize(head)
+        chunks.append(_Chunk(i, "題名・タグ", head, Counter(head_tokens), len(head_tokens), TITLE_WEIGHT))
         for section in paper.sections:
             weight = SUMMARY_WEIGHT if section.name.lower() in SUMMARY_SECTIONS else 1.0
-            chunks.append(_Chunk(i, section.name, section.text, tuple(tokenize(section.text)), weight))
+            tokens = tokenize(section.text)
+            chunks.append(_Chunk(i, section.name, section.text, Counter(tokens), len(tokens), weight))
     return chunks
 
 
 def _bm25(chunks: list[_Chunk], query: list[str]) -> list[float]:
     n = len(chunks)
-    avg = sum(len(c.tokens) for c in chunks) / n if n else 1.0
+    avg = sum(c.length for c in chunks) / n if n else 1.0
     terms = set(query)
-    df = {t: sum(1 for c in chunks if t in c.tokens) for t in terms}
+    df = {t: sum(1 for c in chunks if t in c.counts) for t in terms}
     scores = []
     for chunk in chunks:
-        length = len(chunk.tokens) or 1
-        counts = {t: chunk.tokens.count(t) for t in terms}
+        length = chunk.length or 1
         score = 0.0
-        for term, tf in counts.items():
+        for term in terms:
+            tf = chunk.counts.get(term, 0)
             if tf == 0:
                 continue
             idf = math.log((n - df[term] + 0.5) / (df[term] + 0.5) + 1)

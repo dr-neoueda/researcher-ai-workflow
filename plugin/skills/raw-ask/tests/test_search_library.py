@@ -108,3 +108,40 @@ def test_empty_library_is_reported(tmp_path: Path, capsys: pytest.CaptureFixture
     lib.mkdir()
     assert sl.main(["x", "--library", str(lib)]) == 0
     assert "登録済みの論文がまだありません" in capsys.readouterr().out
+
+
+# ---------- 仕組みごとに効いているかを確かめる ----------
+
+def test_japanese_tokens_are_kanji_katakana_pairs_without_particles() -> None:
+    assert sl.tokenize("の速度論について") == ["速度", "度論"]
+    assert sl.tokenize("カルボニル") == ["カル", "ルボ", "ボニ", "ニル"]
+
+
+def test_english_stopwords_are_dropped() -> None:
+    assert sl.tokenize("the effect of a solvent on the yield") == ["effect", "solvent", "yield"]
+
+
+def test_japanese_only_query_finds_the_paper(library: Path) -> None:
+    hits = sl.search(sl.load_library(library), ["固相反応の速度論"])
+    assert hits[0].paper.path.stem == "sato-2023"
+
+
+def test_a_title_match_beats_a_repeated_body_word(library: Path) -> None:
+    _paper(library, "kim-2021", "Unrelated title about catalysis",
+           "## 本文の一節\nphotochemistry photochemistry photochemistry photochemistry photochemistry\n")
+    hits = sl.search(sl.load_library(library), ["photochemistry"])
+    assert hits[0].paper.path.stem == "lee-2022"
+
+
+def test_each_query_counts_equally(library: Path) -> None:
+    hits = sl.search(sl.load_library(library), ["Avrami 指数 DSC 等温 速度論 固相 反応速度", "MACE"])
+    scores = {h.paper.path.stem: h.score for h in hits}
+    assert scores["wang-2024"] >= 0.9 * scores["sato-2023"]
+
+
+def test_snippet_shows_the_matching_part_of_a_long_section(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    _paper(lib, "long", "A long paper", "## 主要な結果\n" + "背景の説明。" * 80 + "Avrami 指数は 2.1 であった。\n")
+    (hit,) = sl.search(sl.load_library(lib), ["Avrami"])
+    assert "Avrami" in hit.snippet

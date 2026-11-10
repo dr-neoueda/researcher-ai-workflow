@@ -8,8 +8,8 @@
 
 | 項目 | 値 |
 |---|---|
-| **配布版** | plugin **2.3.0** / codex 2.3.0 / copilot 1.46.0（**保留中**・旧名 caw）/ gemini 1.49.0（凍結） |
-| **直近の作業** | v2.1〜2.3：研究側の更新を 4 本の PR で進めている（2026-11-10 承認）。PR 1（v2.1.0）＝測定データの置き場の統一・確かめ方の決まり 6 行・数値の照合 `check_numbers.py`。PR 2（v2.2.0）＝Codex 版に hook・hook の文が Claude に届いていなかった不具合の修正。PR 3（v2.3.0）＝計算の見張りを既定に（`hooks/jobwatch.py`）。残り：PR 4＝`raw-ask`（登録論文から答え、無ければ Web で URL つき）。**就活トラックは v2.0.1 で開発終了**（2026-11-10 ユーザー決定。削除はしない） |
+| **配布版** | plugin **2.4.0** / codex 2.4.0 / copilot 1.46.0（**保留中**・旧名 caw）/ gemini 1.49.0（凍結） |
+| **直近の作業** | v2.1〜2.4：研究側の更新を 4 本の PR で進めた（2026-11-10 承認）。PR 1（v2.1.0）＝測定データの置き場の統一・確かめ方の決まり 6 行・数値の照合 `check_numbers.py`。PR 2（v2.2.0）＝Codex 版に hook・hook の文が Claude に届いていなかった不具合の修正。PR 3（v2.3.0）＝計算の見張りを既定に（`hooks/jobwatch.py`）。PR 4（v2.4.0）＝`raw-ask`（登録論文から答え、無ければ Web で URL つき）。**就活トラックは v2.0.1 で開発終了**（2026-11-10 ユーザー決定。削除はしない） |
 | テスト | `plugin/skills` 全体で 514 passed（scaffold 77・check_numbers 236） |
 | 配布元 | https://github.com/dr-neoueda/researcher-ai-workflow（2026-11-06 に `chemist-ai-workflow` から改名。旧 URL は GitHub が転送） |
 
@@ -62,8 +62,8 @@
 
 | CLI | 状態 |
 |---|---|
-| **Codex CLI**（Tier 1・**本命**） | 15 スキル ＋ Hooks 3 本（v2.2.0、Claude Code 版と同じファイル。`/hooks` で承認が要る）。選定理由＝**5 時間ウィンドウが撤廃され週次上限のみ**（2026-07-12 に OpenAI が撤廃、8 月時点で継続中）＝**伴走の 3 時間セッションが途中で上限に当たらない** |
-| **Claude Code**（Tier 2） | 15 スキル ＋ Hooks 3 本（SessionStart / PostToolUse / Stop）。実装は最も厚い |
+| **Codex CLI**（Tier 1・**本命**） | 16 スキル ＋ Hooks（v2.2.0 から。Claude Code 版と同じファイル。`/hooks` で承認が要る）。選定理由＝**5 時間ウィンドウが撤廃され週次上限のみ**（2026-07-12 に OpenAI が撤廃、8 月時点で継続中）＝**伴走の 3 時間セッションが途中で上限に当たらない** |
+| **Claude Code**（Tier 2） | 16 スキル ＋ Hooks（SessionStart / UserPromptSubmit / PostToolUse / Stop）。実装は最も厚い |
 | **Copilot CLI**（企業向け） | ✅ **2026-08-21 に 15 スキルへフルポート完了**。13 スキルは Codex 版と byte 一致（consistency がディレクトリ単位で強制）。**hooks 未移植**・**`caw-slides` の Windows 実機確認が未実施**。**2026-11-06 から開発を保留**（v1.78 の内容・旧名 `caw` のまま。`copilot-plugin/PAUSED.md`） |
 | **Gemini CLI** | ⛔ **2026-08-21 凍結・非推奨**。無料枠ではオンボーディングを完走できず、商品モデル（導入伴走）でも勧める場面が無い。追従させない。`gemini-plugin/FROZEN.md` 参照 |
 
