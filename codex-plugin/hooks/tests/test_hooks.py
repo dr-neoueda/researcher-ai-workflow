@@ -208,10 +208,10 @@ def test_stop_is_quiet_without_activity(project: Path) -> None:
 # ---------- 配線（hooks.json）と Codex 版 ----------
 
 @pytest.mark.parametrize("root", [HOOKS, CODEX_HOOKS])
-def test_hooks_json_wires_the_three_events(root: Path) -> None:
+def test_hooks_json_wires_the_events(root: Path) -> None:
     data = json.loads((root / "hooks.json").read_text(encoding="utf-8"))
     events = data["hooks"]
-    assert set(events) == {"SessionStart", "PostToolUse", "Stop"}
+    assert set(events) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
     matcher = events["PostToolUse"][0]["matcher"]
     assert {"Edit", "Write", "MultiEdit", "apply_patch"} <= set(matcher.split("|"))
     for groups in events.values():
@@ -222,7 +222,10 @@ def test_hooks_json_wires_the_three_events(root: Path) -> None:
                 assert (root / script).is_file(), script
 
 
-@pytest.mark.parametrize("name", ["hooks.json", "load-playbooks.sh", "output-location-check.sh", "learnings-reminder.sh"])
+@pytest.mark.parametrize("name", [
+    "hooks.json", "load-playbooks.sh", "output-location-check.sh", "learnings-reminder.sh", "jobs-reminder.sh",
+    "jobs-stop-check.sh", "jobwatch.py", "_hookio.py", "_common.sh",
+])
 def test_codex_hooks_are_byte_identical(name: str) -> None:
     assert (CODEX_HOOKS / name).read_bytes() == (HOOKS / name).read_bytes()
 
@@ -311,3 +314,53 @@ def test_japanese_paths_survive_a_cp932_console(tmp_path: Path) -> None:
     )
     assert res.returncode == 0
     assert "研究 プロジェクト" in res.stdout.decode("utf-8")
+
+
+# ---------- 計算の見張り（jobwatch）と hook ----------
+
+def _finished_job(project: Path) -> str:
+    import sys as _sys
+    _sys.path.insert(0, str(HOOKS))
+    import jobwatch as jw
+
+    proc = subprocess.Popen([_sys.executable, "-c", "pass"])
+    proc.wait()
+    job = jw.register(project, name="ts1-opt", kind="local", job_id=str(proc.pid), tool="gaussian", log="x.log")
+    jw.watch_once(project, notify=None)
+    return job.key
+
+
+def test_session_start_shows_the_watch_tool_and_pending_jobs(project: Path) -> None:
+    key = _finished_job(project)
+    res = run_hook("load-playbooks.sh", {"cwd": str(project)}, cwd=project)
+    assert "jobwatch.py" in res.stdout
+    assert key in res.stdout and "判定していない" in res.stdout
+
+
+def test_prompt_submit_reminds_of_finished_jobs(project: Path) -> None:
+    key = _finished_job(project)
+    res = run_hook("jobs-reminder.sh", {"hook_event_name": "UserPromptSubmit", "cwd": str(project), "prompt": "続けて"}, cwd=project)
+    assert res.returncode == 0 and key in res.stdout
+
+
+def test_prompt_submit_is_silent_without_jobs(project: Path) -> None:
+    res = run_hook("jobs-reminder.sh", {"cwd": str(project), "prompt": "やあ"}, cwd=project)
+    assert res.returncode == 0 and res.stdout == ""
+
+
+def test_stop_holds_until_finished_jobs_are_judged(project: Path) -> None:
+    key = _finished_job(project)
+    res = run_hook("jobs-stop-check.sh", {"hook_event_name": "Stop", "cwd": str(project)}, cwd=project)
+    assert res.returncode == 2 and key in res.stderr
+
+
+def test_stop_check_does_not_loop(project: Path) -> None:
+    _finished_job(project)
+    res = run_hook("jobs-stop-check.sh", {"cwd": str(project), "stop_hook_active": True}, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_hooks_json_wires_the_job_hooks() -> None:
+    data = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    assert "jobs-reminder.sh" in json.dumps(data["UserPromptSubmit"])
+    assert "jobs-stop-check.sh" in json.dumps(data["Stop"])

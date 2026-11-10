@@ -231,6 +231,12 @@ type: daily
 - 計算が失敗 / 想定外の挙動を示した時は、原因を解析して Playbook の Lessons Learned に追記
 - `last_updated` フィールドを必ず更新
 
+## 計算の見張り（必ず）
+
+- 投入したジョブはすべて `jobwatch.py register` で登録し、`ensure-watcher` で見張りを付ける（ルートの決まり「計算の見張り」）
+- 完走は `jobwatch.py judge` で、プログラム自身の出力（完走の印の数・異常の印・できるはずのファイル）で判定する
+- 判定の結果と登録の key をジョブ記録に書き、同じ応答で次に投入するものを決める
+
 ## HPC 連携
 
 - HPC ジョブ submission script は `jobs/` 配下
