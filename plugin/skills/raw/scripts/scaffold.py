@@ -96,6 +96,7 @@ TOOL_DIRS: dict[str, tuple[str, str]] = {
 }
 
 # always-created domain work dirs -> README one-liner
+# (work/experiments も v2.1 から常に作る。旧い設定の wants_experiment_dir は無視する)
 DOMAIN_DIRS: dict[str, str] = {
     "papers": "`pdf/`＝原本 PDF ／ `md/`＝文献要約。PDF を `pdf/` に入れて「登録して」で `raw-register` が書誌付き要約を `md/<著者-年>.md` に整理します。",
     "topics": "調査トピック・文献リスト（`raw-research` が作る HTML）。",
@@ -524,9 +525,7 @@ def scaffold(config: dict[str, Any], skill_dir: Path, out_dir: Path, *, force: b
     (out_dir / "work" / "papers" / "pdf").mkdir(parents=True, exist_ok=True)
     (out_dir / "work" / "papers" / "md").mkdir(parents=True, exist_ok=True)
 
-    # 7. (v2.1) work/experiments は DOMAIN_DIRS で常に作る。旧い設定の wants_experiment_dir は無視する。
-
-    # 8. integrated inbox
+    # 7. integrated inbox
     emit(out_dir / "inbox" / "README.md", INBOX_README)
 
     return written

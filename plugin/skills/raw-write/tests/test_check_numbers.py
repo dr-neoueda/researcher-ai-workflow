@@ -1,6 +1,7 @@
 """check_numbers.py（原稿・スライドの数を事実の一覧と照合する）のテスト。"""
 from __future__ import annotations
 
+import sys
 import zipfile
 from decimal import Decimal
 from pathlib import Path
@@ -118,9 +119,12 @@ def test_trailing_zero_is_still_exact() -> None:
     assert _status("0.50", "比は 0.5") == "exact"
 
 
-@pytest.mark.parametrize("draft", ["0.63", "0.64"])
-def test_rounding_down_or_up_to_the_written_digits_is_rounded(draft: str) -> None:
-    assert _status(draft, "R² = 0.634") == "rounded"
+def test_rounding_half_up_to_the_written_digits_is_rounded() -> None:
+    assert _status("0.63", "R² = 0.634") == "rounded"
+
+
+def test_rounding_up_without_a_bound_is_a_mismatch() -> None:
+    assert _status("0.64", "R² = 0.634") == "round_mismatch"
 
 
 def test_a_number_two_steps_away_is_missing() -> None:
@@ -226,7 +230,8 @@ def test_pptx_slides_are_read_in_slide_order(tmp_path: Path) -> None:
         },
     )
     nums = cn.read_numbers(p)
-    assert [(n.location, str(n.mantissa)) for n in nums] == [("スライド 2", "31.44"), ("スライド 10", "0.5")]
+    # presentation.xml が無い（最小の zip）ときはファイル番号の順に 1, 2, … と付ける
+    assert [(n.location, str(n.mantissa)) for n in nums] == [("スライド 1", "31.44"), ("スライド 2", "0.5")]
 
 
 def test_unsupported_extension_raises(tmp_path: Path) -> None:
@@ -288,3 +293,225 @@ def test_a_broken_docx_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str
 def test_a_fact_too_large_to_round_is_skipped_not_crashed() -> None:
     (n,) = cn.extract_numbers("0.5", location="L1")
     assert cn.classify(n, _facts("1.0×10^40")).status == "missing"
+
+
+# ---------- レビューの指摘（2026-11-10）----------
+
+@pytest.mark.parametrize(
+    "text", ["$1.5\\times10^{-3}$", "1.5 \\times 10^{-3}", "1.5\\cdot 10^{-3}", "1.5·10^-3"]
+)
+def test_latex_times_and_cdot_exponents(text: str) -> None:
+    assert _values(text) == ["1.5e-3"]
+
+
+@pytest.mark.parametrize(
+    "text,expected", [("0.5 x 100 mm", ["0.5e0"]), ("格子 1.5 x 1000", ["1.5e0"]), ("0.5 x 105 mm", ["0.5e0"])]
+)
+def test_x_followed_by_a_plain_number_is_not_an_exponent(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+def test_dimensions_written_with_x_keep_both_numbers() -> None:
+    assert _values("結晶は 2.5x2.5 mm と 5.0×10.0 mm") == ["2.5e0", "2.5e0", "5.0e0", "10.0e0"]
+
+
+def test_absurd_exponents_are_ignored_not_crashed() -> None:
+    assert _values("1.5×10^99999999999 と 1e999999999999") == []
+
+
+def test_unreadable_file_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    draft = tmp_path / "draft.md"
+    facts = tmp_path / "facts.md"
+    draft.write_text("31.44\n", encoding="utf-8")
+    facts.write_text("31.44\n", encoding="utf-8")
+    draft.chmod(0)
+    try:
+        if __import__("os").access(draft, __import__("os").R_OK):
+            pytest.skip("root などで権限を無視できる環境")
+        assert cn.main([str(draft), "--facts", str(facts)]) == 2
+        assert "読めません" in capsys.readouterr().err
+    finally:
+        draft.chmod(0o644)
+
+
+def test_report_survives_a_cp932_console(tmp_path: Path) -> None:
+    import subprocess
+
+    draft = tmp_path / "draft_✓.md"  # ✓ は cp932 で書けない
+    facts = tmp_path / "facts.md"
+    draft.write_text("比は 1.2×10⁻³ と 0.63\n", encoding="utf-8")
+    facts.write_text("0.634 と 0.0012\n", encoding="utf-8")
+    script = Path(cn.__file__)
+    env = {**__import__("os").environ, "PYTHONIOENCODING": "cp932"}
+    res = subprocess.run(
+        [sys.executable, str(script), str(draft), "--facts", str(facts)], capture_output=True, env=env
+    )
+    assert res.returncode == 0, res.stderr.decode("cp932", "replace")
+
+
+def test_csv_commas_separate_cells_not_thousands(tmp_path: Path) -> None:
+    p = tmp_path / "table.csv"
+    p.write_text("A,5,123.4\n1,123.4,0.5\n", encoding="utf-8")
+    assert [str(n.mantissa) for n in cn.read_numbers(p)] == ["123.4", "123.4", "0.5"]
+
+
+def test_utf8_bom_does_not_hide_the_first_list_marker(tmp_path: Path) -> None:
+    p = tmp_path / "facts.md"
+    p.write_text("1. 障壁 31.44\n", encoding="utf-8-sig")
+    assert [str(n.mantissa) for n in cn.read_numbers(p, include_integers=True)] == ["31.44"]
+
+
+@pytest.mark.parametrize("text,expected", [("$E-0.5$", ["0.5e0"]), ("pH7.4 の緩衝液", ["7.4e0"])])
+def test_a_decimal_after_a_letter_is_still_read(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("−0.5–−0.2 V", ["-0.5e0", "-0.2e0"]),
+        ("-0.5–-0.2 V", ["-0.5e0", "-0.2e0"]),
+        ("$-1.2$--$-0.8$ V", ["-1.2e0", "-0.8e0"]),
+        ("1.5+-0.2", ["1.5e0", "0.2e0"]),
+    ],
+)
+def test_negative_right_end_of_a_range_and_plus_minus(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+def _tex_numbers(tmp_path: Path, body: str) -> list[str]:
+    p = tmp_path / "d.tex"
+    p.write_text(body, encoding="utf-8")
+    return [str(n.mantissa) for n in cn.read_numbers(p)]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "a\\\\[0.5em] b",
+        "\\renewcommand{\\arraystretch}{1.2}",
+        "\\scalebox{0.8}{x}",
+        "\\resizebox{0.9\\linewidth}{!}{x}",
+        "\\definecolor{a}{rgb}{0.2,0.4,0.6}",
+        "\\geometry{margin=2.5cm}",
+        "\\usepackage[margin=2.5cm]{geometry}",
+        "\\fontsize{10.5}{12.5}\\selectfont",
+        "\\linespread{1.3}",
+        "\\textcolor[rgb]{0.1,0.2,0.3}{x}",
+    ],
+)
+def test_more_tex_layout_is_skipped(tmp_path: Path, line: str) -> None:
+    assert _tex_numbers(tmp_path, line + " 値は 31.44\n") == ["31.44"]
+
+
+@pytest.mark.parametrize(
+    "text", ["Figure 2.1 に示す", "Table 3.2 の値", "図 2.1 に示す", "Python 3.12 で動く", "version 2.5 を使う", "式 (3.4) より"]
+)
+def test_numbering_and_versions_after_a_label_are_skipped(text: str) -> None:
+    assert _values(text) == []
+
+
+def test_half_up_rounding_is_rounded() -> None:
+    assert _status("0.13", "0.125") == "rounded"
+
+
+@pytest.mark.parametrize("draft,fact", [("0.2", "0.123"), ("0.6", "0.51"), ("12.4", "12.46")])
+def test_wrong_side_rounding_fails(draft: str, fact: str) -> None:
+    assert _status(draft, fact) == "round_mismatch"
+
+
+@pytest.mark.parametrize("draft", ["R² ≤ 0.64", "R² < 0.64", "0.64 以下", "at most 0.64"])
+def test_rounding_toward_a_stated_bound_is_accepted(draft: str) -> None:
+    (n,) = cn.extract_numbers(draft, location="L1")
+    assert cn.classify(n, _facts("0.634")).status == "bound"
+
+
+def test_markdown_list_markers_in_facts_are_not_facts(tmp_path: Path) -> None:
+    p = tmp_path / "facts.md"
+    p.write_text("1. 障壁 31.44\n2. 収率 85.3\n", encoding="utf-8")
+    assert [str(n.mantissa) for n in cn.read_numbers(p, include_integers=True)] == ["31.44", "85.3"]
+
+
+def test_an_integer_fact_does_not_vouch_for_a_decimal() -> None:
+    assert _status("2.0", "2 h") == "missing"
+
+
+def test_an_integer_fact_still_matches_scientific_notation() -> None:
+    assert _status("1.2×10^3", "1200 個") == "exact"
+
+
+def test_docx_footnotes_and_pptx_notes_are_read(tmp_path: Path) -> None:
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    docx = tmp_path / "d.docx"
+    _write_zip(
+        docx,
+        {
+            "word/document.xml": f"<w:document {w}><w:body><w:p><w:r><w:t>本文 1.5</w:t></w:r></w:p></w:body></w:document>",
+            "word/footnotes.xml": f"<w:footnotes {w}><w:footnote><w:p><w:r><w:t>脚注 2.5</w:t></w:r></w:p></w:footnote></w:footnotes>",
+        },
+    )
+    assert [(n.location, str(n.mantissa)) for n in cn.read_numbers(docx)] == [("段落 1", "1.5"), ("脚注 1", "2.5")]
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    pptx = tmp_path / "d.pptx"
+    _write_zip(
+        pptx,
+        {
+            "ppt/slides/slide1.xml": f"<p:sld {a}><a:p><a:r><a:t>本文 1.5</a:t></a:r></a:p></p:sld>",
+            "ppt/slides/_rels/slide1.xml.rels": (
+                '<Relationships><Relationship Id="rId2" Target="../notesSlides/notesSlide7.xml"/></Relationships>'
+            ),
+            "ppt/notesSlides/notesSlide7.xml": f"<p:notes {a}><a:p><a:r><a:t>原稿 2.5</a:t></a:r></a:p></p:notes>",
+        },
+    )
+    assert [(n.location, str(n.mantissa)) for n in cn.read_numbers(pptx)] == [("スライド 1", "1.5"), ("ノート 1", "2.5")]
+
+
+def test_superscript_runs_in_docx_and_pptx_become_exponents(tmp_path: Path) -> None:
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    docx = tmp_path / "d.docx"
+    body = (
+        f"<w:document {w}><w:body><w:p><w:r><w:t>k = 1.2×10</w:t></w:r>"
+        '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>−3</w:t></w:r></w:p></w:body></w:document>'
+    )
+    _write_zip(docx, {"word/document.xml": body})
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(docx)] == ["1.2e-3"]
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    pptx = tmp_path / "d.pptx"
+    slide = (
+        f'<p:sld {a}><a:p><a:r><a:t>k = 1.2×10</a:t></a:r><a:r><a:rPr lang="en-US" baseline="30000"/>'
+        "<a:t>-3</a:t></a:r></a:p></p:sld>"
+    )
+    _write_zip(pptx, {"ppt/slides/slide1.xml": slide})
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(pptx)] == ["1.2e-3"]
+
+
+def test_pptx_locations_follow_the_presentation_order(tmp_path: Path) -> None:
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    pptx = tmp_path / "d.pptx"
+    _write_zip(
+        pptx,
+        {
+            "ppt/presentation.xml": '<p:presentation><p:sldIdLst><p:sldId id="256" r:id="rId9"/>'
+            '<p:sldId id="257" r:id="rId8"/></p:sldIdLst></p:presentation>',
+            "ppt/_rels/presentation.xml.rels": '<Relationships><Relationship Id="rId8" Target="slides/slide1.xml"/>'
+            '<Relationship Id="rId9" Target="slides/slide2.xml"/></Relationships>',
+            "ppt/slides/slide1.xml": f"<p:sld {a}><a:p><a:r><a:t>後ろ 1.5</a:t></a:r></a:p></p:sld>",
+            "ppt/slides/slide2.xml": f"<p:sld {a}><a:p><a:r><a:t>前 2.5</a:t></a:r></a:p></p:sld>",
+        },
+    )
+    assert [(n.location, str(n.mantissa)) for n in cn.read_numbers(pptx)] == [("スライド 1", "2.5"), ("スライド 2", "1.5")]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "31.44（出どころ: results.csv line 42; Fig. 3）",
+        "31.44（2026-10-27 の記録、p. 12、No. 5）",
+        "31.44 は 2026年11月10日 の測定 [12]",
+        "31.44（表 2、図 4、スライド 7、12 行目）",
+    ],
+)
+def test_provenance_numbers_in_facts_are_not_facts(tmp_path: Path, line: str) -> None:
+    p = tmp_path / "facts.md"
+    p.write_text(line + "\n", encoding="utf-8")
+    assert [str(n.mantissa) for n in cn.read_numbers(p, include_integers=True)] == ["31.44"]
