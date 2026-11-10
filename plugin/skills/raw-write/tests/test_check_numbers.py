@@ -315,8 +315,10 @@ def test_dimensions_written_with_x_keep_both_numbers() -> None:
     assert _values("結晶は 2.5x2.5 mm と 5.0×10.0 mm") == ["2.5e0", "2.5e0", "5.0e0", "10.0e0"]
 
 
-def test_absurd_exponents_are_ignored_not_crashed() -> None:
-    assert _values("1.5×10^99999999999 と 1e999999999999") == []
+def test_absurd_exponents_are_flagged_not_crashed() -> None:
+    nums = cn.extract_numbers("1.5×10^99999999999 と 1e999999999999", location="L1")
+    assert [n.unreadable for n in nums] == [True, True]
+    assert [cn.classify(n, _facts("1.5")).status for n in nums] == ["exp_unread", "exp_unread"]
 
 
 def test_unreadable_file_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -515,3 +517,171 @@ def test_provenance_numbers_in_facts_are_not_facts(tmp_path: Path, line: str) ->
     p = tmp_path / "facts.md"
     p.write_text(line + "\n", encoding="utf-8")
     assert [str(n.mantissa) for n in cn.read_numbers(p, include_integers=True)] == ["31.44"]
+
+
+# ---------- 2 周目のレビューの指摘（2026-11-10）----------
+
+@pytest.mark.parametrize(
+    "text",
+    ["（https://example.com/a）収率は0.52であった", "詳細はhttps://ex.com/x。収率は0.52、", "doi:10.1021/ja00123。収率0.52"],
+)
+def test_urls_and_dois_stop_at_japanese_text(text: str) -> None:
+    assert _values(text) == ["0.52e0"]
+
+
+def test_a_draft_with_no_numbers_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    draft = tmp_path / "draft.md"
+    facts = tmp_path / "facts.md"
+    draft.write_text("収率は十分高い。\n", encoding="utf-8")
+    facts.write_text("0.52\n", encoding="utf-8")
+    assert cn.main([str(draft), "--facts", str(facts)]) == 2
+    assert "原稿から数が 1 つも" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("方式 0.5 s", ["0.5e0"]), ("実行 3.5 min", ["3.5e0"]), ("代表 0.52", ["0.52e0"]),
+    ("設計図 0.5", ["0.5e0"]), ("Eyring式 2.5×10⁻³ s⁻¹", ["2.5e-3"]), ("（図2.1）と 表 3.2", []),
+])
+def test_kanji_labels_must_stand_alone(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [("...0.52", ["0.52e0"]), ("…0.52", ["0.52e0"]), ("Gaussian 16 Rev. C.01", [])])
+def test_ellipsis_before_a_number_keeps_it(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1.2×10-3", "1.2 × 10 -3", "1.2*10^-3", "1.2e–3", "1.2×10^{–3}", "1.2 × 10–3",
+        "1.2×10<sup>-3</sup>", "1.2\\times10\\textsuperscript{-3}", "1.2\\times10^{ -3 }", "1.2 e-3",
+    ],
+)
+def test_more_exponent_spellings(text: str) -> None:
+    assert _values(text) == ["1.2e-3"]
+
+
+def test_dimensions_with_times_ten_are_not_exponents() -> None:
+    assert _values("0.5 × 10 mm と 0.5 x 10-20 mm") == ["0.5e0", "0.5e0"]
+
+
+def test_a_bare_power_of_ten_is_read() -> None:
+    assert _values("濃度は 10⁻³ M、k は 10^{5}") == ["1e-3", "1e5"]
+
+
+@pytest.mark.parametrize("text", ["‑0.5 V", "‐0.5 V", "‒0.5 V", "ー0.5 V", "${-}0.5$"])
+def test_unicode_hyphens_are_minus_signs(text: str) -> None:
+    assert _values(text) == ["-0.5e0"]
+
+
+def test_katakana_long_vowel_inside_a_word_is_not_a_minus() -> None:
+    assert _values("メーター0.5 m") == ["0.5e0"]
+
+
+@pytest.mark.parametrize("draft,expected", [
+    ("≤ 0.64", "bound"), ("≤ 0.63", "round_mismatch"), ("≥ 0.63", "bound"), ("≥ 0.64", "round_mismatch"),
+    ("0.64 以下", "bound"), ("0.63 以上", "bound"), ("at most 0.63", "round_mismatch"),
+])
+def test_a_bound_must_point_the_right_way(draft: str, expected: str) -> None:
+    (n,) = cn.extract_numbers(draft, location="L1")
+    assert cn.classify(n, _facts("0.636")).status == expected
+
+
+@pytest.mark.parametrize("text", ["recover 0.2", "turnover 0.2", "A -> 0.2", "<b>0.2</b>", "0.2 mol を超音波で"])
+def test_words_that_only_look_like_bounds(text: str) -> None:
+    (n,) = cn.extract_numbers(text, location="L1")
+    assert n.bound is None
+
+
+def test_long_lines_are_linear(tmp_path: Path) -> None:
+    import time
+
+    t0 = time.perf_counter()
+    cn.extract_numbers("0.5 " * 5000, location="L1")
+    cn.extract_numbers("1," * 50000 + "2", location="L1", include_integers=True)
+    assert time.perf_counter() - t0 < 2.0
+
+
+@pytest.mark.parametrize("text", ["1 234.5", "1 234.5", "1 234.5"])
+def test_thin_space_thousands(text: str) -> None:
+    assert _values(text) == ["1234.5e0"]
+
+
+def test_decimal_commas_are_pointed_out(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    draft = tmp_path / "draft.md"
+    facts = tmp_path / "facts.md"
+    draft.write_text("収率 0,52 と 31.44\n", encoding="utf-8")
+    facts.write_text("31.44\n", encoding="utf-8")
+    cn.main([str(draft), "--facts", str(facts)])
+    assert "小数点がカンマかもしれない" in capsys.readouterr().out
+
+
+def test_docx_equations_are_read(tmp_path: Path) -> None:
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    docx = tmp_path / "d.docx"
+    body = (
+        f"<w:document {w}><w:body><w:p><w:r><w:t>k = </w:t></w:r><m:oMath><m:r><m:t>1.5×</m:t></m:r>"
+        "<m:sSup><m:e><m:r><m:t>10</m:t></m:r></m:e><m:sup><m:r><m:t>−3</m:t></m:r></m:sup></m:sSup>"
+        "</m:oMath></w:p></w:body></w:document>"
+    )
+    _write_zip(docx, {"word/document.xml": body})
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(docx)] == ["1.5e-3"]
+
+
+def test_en_dash_after_a_number_and_a_space_is_a_range() -> None:
+    assert _values("0.5 –0.8 と 12.5 —15.0") == ["0.5e0", "0.8e0", "12.5e0", "15.0e0"]
+
+
+def test_supplementary_figure_numbers_are_labels() -> None:
+    assert _values("Fig. S1.2 と 図 S2.3") == []
+
+
+def test_absurd_exponent_is_reported_not_dropped() -> None:
+    (n,) = cn.extract_numbers("1.2×10^1000", location="L1")
+    assert cn.classify(n, _facts("1.2")).status == "exp_unread"
+
+
+def test_tex_primitive_skips_are_layout(tmp_path: Path) -> None:
+    assert _tex_numbers(tmp_path, "a\\hskip 0.5em b \\vskip -1.5pt 値は 31.44\n") == ["31.44"]
+
+
+def test_small_numbers_are_shown_without_scientific_notation() -> None:
+    (n,) = cn.extract_numbers("0.0000001", location="L1")
+    assert n.text == "0.0000001"
+
+
+def test_pptx_relationship_attributes_in_any_order(tmp_path: Path) -> None:
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    pptx = tmp_path / "d.pptx"
+    _write_zip(
+        pptx,
+        {
+            "ppt/presentation.xml": '<p:presentation><p:sldIdLst><p:sldId id="256" r:id="rId9"/>'
+            '<p:sldId id="257" r:id="rId8"/></p:sldIdLst></p:presentation>',
+            "ppt/_rels/presentation.xml.rels": '<Relationships><Relationship Target="slides/slide1.xml" Id="rId8"/>'
+            '<Relationship Target="slides/slide2.xml" Id="rId9"/></Relationships>',
+            "ppt/slides/slide1.xml": f"<p:sld {a}><a:p><a:r><a:t>後ろ 1.5</a:t></a:r></a:p></p:sld>",
+            "ppt/slides/slide2.xml": f"<p:sld {a}><a:p><a:r><a:t>前 2.5</a:t></a:r></a:p></p:sld>",
+        },
+    )
+    assert [(n.location, str(n.mantissa)) for n in cn.read_numbers(pptx)] == [("スライド 1", "2.5"), ("スライド 2", "1.5")]
+
+
+def test_docx_equation_with_a_positive_power(tmp_path: Path) -> None:
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    docx = tmp_path / "d.docx"
+    body = (
+        f"<w:document {w}><w:body><w:p><m:oMath><m:r><m:t>1.5×</m:t></m:r>"
+        "<m:sSup><m:e><m:r><m:t>10</m:t></m:r></m:e><m:sup><m:r><m:t>5</m:t></m:r></m:sup></m:sSup>"
+        "</m:oMath></w:p></w:body></w:document>"
+    )
+    _write_zip(docx, {"word/document.xml": body})
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(docx)] == ["1.5e5"]
+
+
+def test_markdown_blockquote_marker_is_not_a_bound(tmp_path: Path) -> None:
+    p = tmp_path / "d.md"
+    p.write_text("> 0.2 の引用\n", encoding="utf-8")
+    (n,) = cn.read_numbers(p)
+    assert n.bound is None
