@@ -10,6 +10,15 @@ import pytest
 
 import check_numbers as cn
 
+ALL_NS = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+    'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+)
+
 
 def _values(text: str, include_integers: bool = False) -> list[str]:
     """抽出した数を「仮数e指数」の文字列で返す（比べやすくするため）。"""
@@ -75,7 +84,7 @@ def test_superscript_unit_exponents_are_not_numbers() -> None:
 
 
 def test_slash_separated_pairs_are_both_numbers_but_paths_are_not() -> None:
-    assert _values("橋は 3.002/2.078 Å、図は figs/1.25 にある") == ["3.002e0", "2.078e0"]
+    assert _values("橋は 3.002/2.078 Å、図は data/figs/1.25 にある") == ["3.002e0", "2.078e0"]
 
 
 def test_latex_double_hyphen_range_is_not_a_minus_sign() -> None:
@@ -221,7 +230,7 @@ def test_docx_paragraphs_are_read(tmp_path: Path) -> None:
 
 def test_pptx_slides_are_read_in_slide_order(tmp_path: Path) -> None:
     p = tmp_path / "deck.pptx"
-    ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    ns = ALL_NS
     _write_zip(
         p,
         {
@@ -443,7 +452,7 @@ def test_an_integer_fact_still_matches_scientific_notation() -> None:
 
 
 def test_docx_footnotes_and_pptx_notes_are_read(tmp_path: Path) -> None:
-    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    w = ALL_NS
     docx = tmp_path / "d.docx"
     _write_zip(
         docx,
@@ -453,7 +462,7 @@ def test_docx_footnotes_and_pptx_notes_are_read(tmp_path: Path) -> None:
         },
     )
     assert [(n.location, str(n.mantissa)) for n in cn.read_numbers(docx)] == [("段落 1", "1.5"), ("脚注 1", "2.5")]
-    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    a = ALL_NS
     pptx = tmp_path / "d.pptx"
     _write_zip(
         pptx,
@@ -469,7 +478,7 @@ def test_docx_footnotes_and_pptx_notes_are_read(tmp_path: Path) -> None:
 
 
 def test_superscript_runs_in_docx_and_pptx_become_exponents(tmp_path: Path) -> None:
-    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    w = ALL_NS
     docx = tmp_path / "d.docx"
     body = (
         f"<w:document {w}><w:body><w:p><w:r><w:t>k = 1.2×10</w:t></w:r>"
@@ -477,7 +486,7 @@ def test_superscript_runs_in_docx_and_pptx_become_exponents(tmp_path: Path) -> N
     )
     _write_zip(docx, {"word/document.xml": body})
     assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(docx)] == ["1.2e-3"]
-    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    a = ALL_NS
     pptx = tmp_path / "d.pptx"
     slide = (
         f'<p:sld {a}><a:p><a:r><a:t>k = 1.2×10</a:t></a:r><a:r><a:rPr lang="en-US" baseline="30000"/>'
@@ -488,7 +497,7 @@ def test_superscript_runs_in_docx_and_pptx_become_exponents(tmp_path: Path) -> N
 
 
 def test_pptx_locations_follow_the_presentation_order(tmp_path: Path) -> None:
-    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    a = ALL_NS
     pptx = tmp_path / "d.pptx"
     _write_zip(
         pptx,
@@ -618,7 +627,7 @@ def test_decimal_commas_are_pointed_out(tmp_path: Path, capsys: pytest.CaptureFi
 
 
 def test_docx_equations_are_read(tmp_path: Path) -> None:
-    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    w = ALL_NS
     docx = tmp_path / "d.docx"
     body = (
         f"<w:document {w}><w:body><w:p><w:r><w:t>k = </w:t></w:r><m:oMath><m:r><m:t>1.5×</m:t></m:r>"
@@ -652,7 +661,7 @@ def test_small_numbers_are_shown_without_scientific_notation() -> None:
 
 
 def test_pptx_relationship_attributes_in_any_order(tmp_path: Path) -> None:
-    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    a = ALL_NS
     pptx = tmp_path / "d.pptx"
     _write_zip(
         pptx,
@@ -669,7 +678,7 @@ def test_pptx_relationship_attributes_in_any_order(tmp_path: Path) -> None:
 
 
 def test_docx_equation_with_a_positive_power(tmp_path: Path) -> None:
-    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    w = ALL_NS
     docx = tmp_path / "d.docx"
     body = (
         f"<w:document {w}><w:body><w:p><m:oMath><m:r><m:t>1.5×</m:t></m:r>"
@@ -684,4 +693,119 @@ def test_markdown_blockquote_marker_is_not_a_bound(tmp_path: Path) -> None:
     p = tmp_path / "d.md"
     p.write_text("> 0.2 の引用\n", encoding="utf-8")
     (n,) = cn.read_numbers(p)
+    assert n.bound is None
+
+
+# ---------- 3 周目のレビューの指摘（2026-11-10）----------
+
+def _docx(tmp_path: Path, paragraphs_xml: str) -> Path:
+    path = tmp_path / "d.docx"
+    _write_zip(path, {"word/document.xml": f"<w:document {ALL_NS}><w:body>{paragraphs_xml}</w:body></w:document>"})
+    return path
+
+
+def test_docx_tabs_and_breaks_separate_numbers(tmp_path: Path) -> None:
+    body = (
+        "<w:p><w:r><w:t>k 0.52</w:t><w:tab/><w:t>0.61</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>0.53</w:t><w:br/><w:t>0.62</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>0.71</w:t></w:r></w:p>"
+    )
+    assert [str(n.mantissa) for n in cn.read_numbers(_docx(tmp_path, body))] == ["0.52", "0.61", "0.53", "0.62", "0.71"]
+
+
+def test_pptx_line_breaks_separate_numbers(tmp_path: Path) -> None:
+    pptx = tmp_path / "d.pptx"
+    slide = f"<p:sld {ALL_NS}><a:p><a:r><a:t>0.52</a:t></a:r><a:br/><a:r><a:t>0.61</a:t></a:r></a:p></p:sld>"
+    _write_zip(pptx, {"ppt/slides/slide1.xml": slide})
+    assert [str(n.mantissa) for n in cn.read_numbers(pptx)] == ["0.52", "0.61"]
+
+
+def test_docx_no_break_hyphen_is_a_minus(tmp_path: Path) -> None:
+    body = "<w:p><w:r><w:t>ΔE = </w:t><w:noBreakHyphen/><w:t>0.5 eV</w:t></w:r></w:p>"
+    assert [str(n.mantissa) for n in cn.read_numbers(_docx(tmp_path, body))] == ["-0.5"]
+
+
+def test_docx_text_box_keeps_the_text_after_it(tmp_path: Path) -> None:
+    body = (
+        "<w:p><w:r><w:t>a </w:t></w:r><w:r><w:pict><w:txbxContent><w:p><w:r><w:t>box 1.5</w:t></w:r></w:p>"
+        "</w:txbxContent></w:pict></w:r><w:r><w:t>yield 0.52</w:t></w:r></w:p>"
+    )
+    found = {(n.location, str(n.mantissa)) for n in cn.read_numbers(_docx(tmp_path, body))}
+    assert found == {("段落 1", "0.52"), ("段落 2", "1.5")}
+
+
+def test_decimal_powers_after_a_caret_are_read() -> None:
+    assert _values("Rate ∝ t^0.5、t^-0.5、T^1.5 と R^2") == ["0.5e0", "-0.5e0", "1.5e0"]
+
+
+@pytest.mark.parametrize("text,expected", [("_0.52_ を強調", ["0.52e0"]), ("run_0.5 の結果", [])])
+def test_underscore_is_an_identifier_only_after_a_letter(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+def test_a_slash_after_a_unit_is_not_a_path() -> None:
+    assert _values("10 mg/0.5 mL THF と ./figs/1.25") == ["0.5e0"]
+
+
+@pytest.mark.parametrize("text", ["|https://x.org/a|0.52|0.61|", "https://x.org/a;0.52;0.61"])
+def test_urls_stop_at_table_separators(text: str) -> None:
+    assert _values(text) == ["0.52e0", "0.61e0"]
+
+
+def test_csv_url_column(tmp_path: Path) -> None:
+    p = tmp_path / "t.csv"
+    p.write_text("https://x.org/a,0.52,0.61\n", encoding="utf-8")
+    assert [str(n.mantissa) for n in cn.read_numbers(p)] == ["0.52", "0.61"]
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("The yield [p = 0.03] was", ["0.03"]), ("\\left[ x = 0.52 \\right]", ["0.52"]),
+    ("\\includegraphics[width=0.5\\linewidth]{a.png} 31.44", ["31.44"]), ("S[table-format=1.4] 31.44", ["31.44"]),
+])
+def test_tex_brackets_with_equals_are_options_only_after_a_command(tmp_path: Path, line: str, expected: list[str]) -> None:
+    assert _tex_numbers(tmp_path, line + "\n") == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("1.2 × 10$^{-3}$ と 5 × 10$^{-3}$", ["1.2e-3", "5e-3"]), ("1.2 × 10^(-3)", ["1.2e-3"]), ("conc 5 x 10-3 M", ["5e-3"]),
+])
+def test_more_exponent_spellings_round_three(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize("draft,expected", [("p = 0.05", "missing"), ("p < 0.05", "exact")])
+def test_a_bounded_fact_only_supports_the_same_bound(draft: str, expected: str) -> None:
+    (n,) = cn.extract_numbers(draft, location="L1")
+    assert cn.classify(n, _facts("detection limit < 0.05 (src A)")).status == expected
+
+
+def test_particles_are_not_units_before_a_japanese_bound() -> None:
+    (n,) = cn.extract_numbers("0.52 を以下の式に代入", location="L1")
+    assert n.bound is None
+
+
+def test_nbsp_between_a_decimal_and_a_number_does_not_join() -> None:
+    assert _values("0.52\u00a0100 個", include_integers=True) == ["0.52e0", "100e0"]
+
+
+@pytest.mark.parametrize("text,expected", [("ΔE−0.52 eV", ["-0.52e0"]), ("$E-0.5$", ["0.5e0"])])
+def test_true_minus_after_a_letter_keeps_its_sign(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+def test_interval_then_parenthesis_is_not_a_markdown_link() -> None:
+    assert _values("[0.1, 0.3](0.52)") == ["0.1e0", "0.3e0", "0.52e0"]
+
+
+def test_skipped_decimals_are_listed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    draft = tmp_path / "draft.md"
+    facts = tmp_path / "facts.md"
+    draft.write_text("Fig. 3.2 に示すように 31.44、v2.0.1 を使った\n", encoding="utf-8")
+    facts.write_text("31.44\n", encoding="utf-8")
+    assert cn.main([str(draft), "--facts", str(facts)]) == 0
+    out = capsys.readouterr().out
+    assert "読まなかった小数" in out and "3.2" in out and "2.0" in out
+
+
+def test_maximum_and_minimum_are_values_not_bounds() -> None:
+    (n,) = cn.extract_numbers("V の段は最大 0.068 %、最小 0.01", location="L1")[:1]
     assert n.bound is None
