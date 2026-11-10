@@ -21,6 +21,7 @@ ssh が通らないとき（VPN・二段階認証）は「不明」として走�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
@@ -31,6 +32,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +80,7 @@ class Job:
     verdict: str | None = None
     codex_thread: str | None = None
     last_check: str | None = None
+    pid_started: str | None = None  # ローカルのジョブのプロセスの開始時刻（PID の使い回しを見分ける）
 
 
 @dataclass(frozen=True)
@@ -99,13 +102,32 @@ def _check_project(project: Path) -> None:
         raise ValueError(f"raw の office/ が見つかりません: {project}")
 
 
+def _write_json(path: Path, data: dict) -> None:
+    """書き手ごとに別の一時ファイルに書いてから置き換える（見張りと wait が同時に書いても壊れない）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def _save(project: Path, job: Job) -> None:
-    folder = _watch_dir(project)
-    folder.mkdir(parents=True, exist_ok=True)
-    data = dataclasses.asdict(job)
-    tmp = folder / f".{job.key}.json.tmp"
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(folder / f"{job.key}.json")
+    _write_json(_watch_dir(project) / f"{job.key}.json", dataclasses.asdict(job))
+
+
+def _update(project: Path, key: str, expect_state: str, **changes: object) -> Job | None:
+    """保存の直前に読み直し、状態がまだ expect_state のときだけ書き換える（古い読み込みで上書きしない）。"""
+    job = load_job(project, key)
+    if job.state != expect_state:
+        return None
+    new = dataclasses.replace(job, **changes)
+    _save(project, new)
+    return new
 
 
 def _from_dict(data: dict) -> Job:
@@ -163,94 +185,173 @@ def register(
     _check_project(project)
     if kind not in KINDS:
         raise ValueError(f"ジョブの種類が分かりません: {kind}（{' / '.join(KINDS)}）")
+    if kind == "local" and host:
+        raise ValueError("local のジョブに --host は付けられません（別の計算機なら pbs か slurm で登録する）")
     tool_key, done_markers, fail_markers = _markers(tool, done, fail)
-    base = f"{dt.date.today().isoformat()}-{_slug(name)}"
-    key, n = base, 2
-    while (_watch_dir(project) / f"{key}.json").exists():
-        key, n = f"{base}-{n}", n + 1
-    job = Job(
-        key=key, name=name, kind=kind, id=str(job_id), log=log, done=done_markers, fail=fail_markers, host=host,
+    template = Job(
+        key="", name=name, kind=kind, id=str(job_id), log=log, done=done_markers, fail=fail_markers, host=host,
         tool=tool_key, expect_count=expect_count, outputs=tuple(outputs or ()), expect_minutes=expect_minutes,
         registered_at=_now(), codex_thread=os.environ.get("CODEX_THREAD_ID") or None,
+        pid_started=_process_start(str(job_id)) if kind == "local" else None,
     )
-    _save(project, job)
-    return job
+    return _create(project, template)
 
 
-def _run(cmd: list[str], host: str | None) -> subprocess.CompletedProcess | None:
+def _create(project: Path, template: Job) -> Job:
+    """同じ名前のジョブがあっても上書きしないよう、ファイルを排他的に作って key を決める。"""
+    folder = _watch_dir(project)
+    folder.mkdir(parents=True, exist_ok=True)
+    base = f"{dt.date.today().isoformat()}-{_slug(template.name)}"
+    for n in range(1, 1000):
+        key = base if n == 1 else f"{base}-{n}"
+        job = dataclasses.replace(template, key=key)
+        try:
+            with open(folder / f"{key}.json", "x", encoding="utf-8") as f:
+                json.dump(dataclasses.asdict(job), f, ensure_ascii=False, indent=2)
+        except FileExistsError:
+            continue
+        return job
+    raise ValueError(f"同じ名前のジョブが多すぎます: {template.name}")
+
+
+def _run(cmd: list[str], host: str | None, timeout: float = SSH_TIMEOUT) -> subprocess.CompletedProcess | None:
+    """コマンドを走らせる（host があれば ssh 越し）。時間切れなら子プロセスごと止めて None。"""
     if host:
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT // 2}", host, shlex.join(cmd)]
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=SSH_TIMEOUT, errors="replace")
-    except (OSError, subprocess.TimeoutExpired):
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+            start_new_session=os.name != "nt",
+        )
+    except OSError:
         return None
-
-
-def _local_running(pid_text: str) -> bool | None:
     try:
-        pid = int(pid_text)
-    except ValueError:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, 9) if os.name != "nt" else proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=2)
         return None
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _process_start(pid_text: str) -> str | None:
+    """プロセスの開始時刻（POSIX の ps）。取れなければ None。"""
+    if os.name == "nt" or not pid_text.isdigit():
+        return None
+    res = _run(["ps", "-o", "lstart=", "-p", pid_text], None, timeout=10)
+    return res.stdout.strip() or None if res and res.returncode == 0 else None
+
+
+def _pid_alive(pid: int) -> bool | None:
     if os.name == "nt":
-        res = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, errors="replace")
-        return str(pid) in res.stdout
+        res = _run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], None, timeout=10)
+        return None if res is None else str(pid) in res.stdout
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
-    return not state.startswith("Z")  # 終わったのに回収されていないプロセスは終わり扱い
-
-
-def _pbs_running(job: Job) -> bool | None:
-    res = _run(["qstat", "-f", job.id], job.host)
-    if res is None or (job.host and res.returncode == 255):
+    except OSError:
         return None
+    res = _run(["ps", "-o", "stat=", "-p", str(pid)], None, timeout=10)
+    return not (res and res.stdout.strip().startswith("Z"))  # 終わったのに回収されていないプロセスは終わり扱い
+
+
+def _local_check(job: Job) -> tuple[bool | None, str]:
+    if not job.id.isdigit():
+        return None, "不明: PID ではない"
+    alive = _pid_alive(int(job.id))
+    if alive and job.pid_started and _process_start(job.id) != job.pid_started:
+        return False, "終了（同じ PID の別のプロセスが走っている）"
+    return alive, {True: "走行中", False: "終了", None: "不明"}[alive]
+
+
+def _remote_problem(res: subprocess.CompletedProcess | None, job: Job, tool: str) -> str | None:
+    """ssh や問い合わせのコマンドの不調。無ければ None。"""
+    if res is None:
+        return "不明: 応答が無い（ssh・VPN・混雑）"
     text = res.stdout + res.stderr
+    if job.host and res.returncode == 255:
+        return "不明: ssh が通らない（VPN・二段階認証・鍵）"
+    if res.returncode == 127 or "command not found" in text:
+        return f"不明: {tool} が見つからない（ssh の先の PATH。ログインシェルの設定を確かめる）"
+    return None
+
+
+def _pbs_check(job: Job) -> tuple[bool | None, str]:
+    res = _run(["qstat", "-f", job.id], job.host)
+    problem = _remote_problem(res, job, "qstat")
+    if problem:
+        return None, problem
+    text = res.stdout + res.stderr
+    if "Job has finished" in text or "Unknown Job" in text or res.returncode in (35, 153):
+        return False, "終了"
     if res.returncode != 0:
-        return False if ("Unknown Job" in text or res.returncode == 153) else None
+        return None, f"不明: qstat の終了コード {res.returncode}"
     m = re.search(r"job_state\s*=\s*([A-Z])", text)
-    return (m.group(1) in PBS_RUNNING_STATES and m.group(1) not in "FC") if m else True
+    running = (m.group(1) in PBS_RUNNING_STATES and m.group(1) not in "FC") if m else True
+    return running, "走行中" if running else "終了"
 
 
-def _slurm_running(job: Job) -> bool | None:
+def _slurm_check(job: Job) -> tuple[bool | None, str]:
     res = _run(["squeue", "-h", "-j", job.id], job.host)
-    if res is None or (job.host and res.returncode == 255):
-        return None
+    problem = _remote_problem(res, job, "squeue")
+    if problem:
+        return None, problem
     if res.returncode != 0:
-        return False if "Invalid job id" in res.stderr else None
-    return bool(res.stdout.strip())
+        return (False, "終了") if "Invalid job id" in res.stderr else (None, f"不明: squeue の終了コード {res.returncode}")
+    running = bool(res.stdout.strip())
+    return running, "走行中" if running else "終了"
+
+
+def check(job: Job) -> tuple[bool | None, str]:
+    """走っているか（True / False / 確かめられなければ None）と、その説明。"""
+    if job.kind == "local":
+        return _local_check(job)
+    return _pbs_check(job) if job.kind == "pbs" else _slurm_check(job)
 
 
 def is_running(job: Job) -> bool | None:
     """走っていれば True、終わっていれば False、確かめられなければ None（ssh が通らない等）。"""
-    if job.kind == "local":
-        return _local_running(job.id) if not job.host else None
-    return _pbs_running(job) if job.kind == "pbs" else _slurm_running(job)
+    return check(job)[0]
 
 
-def _scan_log(path: Path, job: Job) -> tuple[list[str], list[str]]:
+REMOTE_LOG_BYTES = 5_000_000  # HPC のログは末尾のこれだけを読む
+
+
+def _read_log(project: Path, job: Job) -> str | None:
+    """ログの中身。手元に無く host があれば ssh で末尾を読む。読めなければ None。"""
+    local = project / job.log
+    if local.is_file():
+        return local.read_text(encoding="utf-8", errors="replace")
+    if job.host:
+        res = _run(["tail", "-c", str(REMOTE_LOG_BYTES), job.log], job.host, timeout=60)
+        if res is not None and res.returncode == 0:
+            return res.stdout
+    return None
+
+
+def _scan_log(text: str, job: Job) -> tuple[list[str], list[str]]:
     done_lines, fail_lines = [], []
-    with path.open(encoding="utf-8", errors="replace") as f:
-        for i, line in enumerate(f, 1):
-            text = line.rstrip()
-            if any(m in text for m in job.fail):
-                fail_lines.append(f"L{i}: {text.strip()}")
-            elif any(m in text for m in job.done):
-                done_lines.append(f"L{i}: {text.strip()}")
+    for i, line in enumerate(text.splitlines(), 1):
+        if any(m in line for m in job.fail):
+            fail_lines.append(f"L{i}: {line.strip()}")
+        elif any(m in line for m in job.done):
+            done_lines.append(f"L{i}: {line.strip()}")
     return done_lines, fail_lines
 
 
 def judge(project: Path, key: str) -> Verdict:
     """ログの印とできるはずのファイルで判定する（終了コード・ジョブ管理の表示では決めない）。判定は記録に残す。"""
     job = load_job(project, key)
-    log = project / job.log
-    if not log.is_file():
+    text = _read_log(project, job)
+    if text is None:
         verdict = Verdict("判定できない", (f"ログが見つかりません: {job.log}",))
     else:
-        done_lines, fail_lines = _scan_log(log, job)
+        done_lines, fail_lines = _scan_log(text, job)
         expected = job.expect_count or 1
         missing = [o for o in job.outputs if not (project / o).is_file() or (project / o).stat().st_size == 0]
         if fail_lines:
@@ -261,7 +362,10 @@ def judge(project: Path, key: str) -> Verdict:
             verdict = Verdict("完走していない", tuple(notes + done_lines[:3]))
         else:
             verdict = Verdict("完走", tuple(done_lines[:expected + 2]))
-    _save(project, dataclasses.replace(job, state="judged", verdict=verdict.status))
+    if job.state == "running":
+        return Verdict(verdict.status, verdict.evidence + ("まだ走っている（見張りが終わりを確かめていない）ので、判定は記録しない",))
+    if verdict.status != "判定できない":
+        _save(project, dataclasses.replace(job, state="judged", verdict=verdict.status))
     return verdict
 
 
@@ -270,7 +374,9 @@ def _script() -> str:
 
 
 def _command(*args: str) -> str:
-    return shlex.join([Path(sys.executable).name if os.name == "nt" else "python3", _script(), *args])
+    if os.name == "nt":
+        return subprocess.list2cmdline([Path(sys.executable).name, _script(), *args])
+    return shlex.join(["python3", _script(), *args])
 
 
 def finished_message(project: Path, job: Job) -> str:
@@ -283,7 +389,7 @@ def finished_message(project: Path, job: Job) -> str:
 
 def os_notify(message: str) -> None:
     """OS の通知（届かなくても止めない）。"""
-    short = message.replace('"', "'")[:200]
+    short = message[:200].replace("\\", "\\\\").replace('"', "'")
     try:
         if sys.platform == "darwin" and shutil.which("osascript"):
             script = f'display notification "{short}" with title "raw"'
@@ -307,9 +413,11 @@ def _tell_codex(job: Job, message: str) -> None:
         pass
 
 
-def _mark_finished(project: Path, job: Job, notify: Notify | None) -> Job:
-    done = dataclasses.replace(job, state="finished", finished_at=_now(), last_check="終了")
-    _save(project, done)
+def _mark_finished(project: Path, key: str, notify: Notify | None) -> Job | None:
+    """まだ走行中の記録なら「終わった」にして知らせる。別の書き手が先に進めていたら何もしない（二重に知らせない）。"""
+    done = _update(project, key, "running", state="finished", finished_at=_now(), last_check="終了")
+    if done is None:
+        return None
     message = finished_message(project, done)
     if notify is not None:
         notify(message)
@@ -317,48 +425,67 @@ def _mark_finished(project: Path, job: Job, notify: Notify | None) -> Job:
     return done
 
 
-def watch_once(project: Path, notify: Notify | None = os_notify) -> list[str]:
+def watch_once(project: Path, notify: Notify | None = os_notify, beat: Callable[[], None] | None = None) -> list[str]:
     """走っているジョブを 1 回ずつ確かめ、終わったものを記録して知らせる。終わったジョブの key を返す。"""
     finished = []
     for job in load_jobs(project):
         if job.state != "running":
             continue
-        running = is_running(job)
+        if beat is not None:
+            beat()  # 確かめるのに時間がかかっても、見張りが止まって見えないように
+        running, note = check(job)
         if running is False:
-            finished.append(_mark_finished(project, job, notify).key)
+            done = _mark_finished(project, job.key, notify)
+            if done is not None:
+                finished.append(done.key)
         else:
-            _save(project, dataclasses.replace(job, last_check="走行中" if running else "不明"))
+            _update(project, job.key, "running", last_check=note)
     return finished
 
 
 def _beat(project: Path, interval: float) -> None:
-    path = _watch_dir(project) / HEARTBEAT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"pid": os.getpid(), "beat": time.time(), "interval": interval}), encoding="utf-8")
+    _write_json(_watch_dir(project) / HEARTBEAT, {"pid": os.getpid(), "beat": time.time(), "interval": interval})
 
 
 def watch(project: Path, interval: float = DEFAULT_INTERVAL, notify: Notify | None = os_notify,
           max_loops: int | None = None) -> int:
-    """走っているジョブが無くなるまで見張る。回った回数を返す。"""
+    """走っているジョブが無くなるまで見張る。回った回数を返す。終わるときは心拍を消す（次の見張りが起動できるように）。"""
     loops = 0
-    while max_loops is None or loops < max_loops:
-        loops += 1
-        _beat(project, interval)
-        watch_once(project, notify)
-        if not any(j.state == "running" for j in load_jobs(project)):
-            break
-        time.sleep(interval)
+    try:
+        while max_loops is None or loops < max_loops:
+            loops += 1
+            _beat(project, interval)
+            try:
+                watch_once(project, notify, lambda: _beat(project, interval))
+            except Exception as exc:  # noqa: BLE001 — 1 回の失敗で見張りを止めない
+                print(f"{_now()} 見張りの 1 回に失敗（続ける）: {exc!r}", file=sys.stderr, flush=True)
+            if not any(j.state == "running" for j in load_jobs(project)):
+                break
+            time.sleep(interval)
+    finally:
+        with contextlib.suppress(OSError):
+            (_watch_dir(project) / HEARTBEAT).unlink()
     return loops
 
 
-def wait(project: Path, key: str, interval: float = DEFAULT_INTERVAL) -> str:
-    """そのジョブが終わるまで待つ。終わったら状態（finished / judged）を返す。"""
+def wait(project: Path, key: str, interval: float = DEFAULT_INTERVAL, give_up_after: float = 3600.0) -> str:
+    """そのジョブが終わるまで待つ。終わったら状態（finished / judged）を、確かめられない状態が
+    give_up_after 秒続いたら "unknown" を返す（HPC に届かないまま黙って待ち続けない）。"""
+    unknown_since: float | None = None
     while True:
         job = load_job(project, key)
         if job.state != "running":
             return job.state
-        if is_running(job) is False:
-            return _mark_finished(project, job, notify=None).state
+        running, _note = check(job)
+        if running is False:
+            _mark_finished(project, key, notify=None)
+            return load_job(project, key).state
+        if running is None:
+            unknown_since = unknown_since or time.time()
+            if time.time() - unknown_since >= give_up_after:
+                return "unknown"
+        else:
+            unknown_since = None
         time.sleep(interval)
 
 
@@ -369,7 +496,10 @@ def _watcher_alive(project: Path) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     stale = max(STALE_AFTER, 3 * float(data.get("interval", DEFAULT_INTERVAL)))
-    return time.time() - float(data.get("beat", 0)) < stale
+    if time.time() - float(data.get("beat", 0)) >= stale:
+        return False
+    pid = data.get("pid")
+    return not isinstance(pid, int) or _pid_alive(pid) is not False  # 心拍を書いたプロセスが死んでいれば止まっている
 
 
 def pending_text(project: Path) -> str:
@@ -380,6 +510,9 @@ def pending_text(project: Path) -> str:
         if job.state == "finished":
             lines.append(f"- 終わったが判定していない: {job.name}（{job.key}）→ {_command('judge', '--project', str(project), job.key)}")
     running = [j for j in jobs if j.state == "running"]
+    for job in running:
+        if (job.last_check or "").startswith("不明"):
+            lines.append(f"- 確かめられない: {job.name}（{job.key}）: {job.last_check}")
     if running and not _watcher_alive(project):
         for job in running:
             lines.append(f"- 見張りの無いジョブ: {job.name}（{job.key}）")
@@ -411,7 +544,8 @@ def ensure_watcher(project: Path, launch: Launch | None = None) -> str:
     cmd = [sys.executable, _script(), "watch", "--project", str(project)]
     if shutil.which("tmux"):
         session = "raw-watch-" + hashlib.sha1(str(project).encode("utf-8")).hexdigest()[:8]
-        launch(["tmux", "new-session", "-d", "-s", session, shlex.join(cmd)])
+        log = shlex.quote(str(_watch_dir(project) / "_watcher.log"))
+        launch(["tmux", "new-session", "-d", "-s", session, f"{shlex.join(cmd)} >> {log} 2>&1"])
         return "tmux"
     launch(cmd)
     return "detached"
@@ -513,6 +647,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_judge(project, a.key)
         if a.command == "wait":
             state = wait(project, a.key, a.interval)
+            if state == "unknown":
+                note = load_job(project, a.key).last_check or "不明"
+                print(f"[raw jobwatch] {a.key} を 1 時間確かめられません（{note}）。ユーザーに伝え、接続を直してから wait をやり直す")
+                return 3
             print(finished_message(project, load_job(project, a.key)) if state == "finished" else f"状態: {state}")
             return 0
         if a.command == "watch":
