@@ -99,14 +99,14 @@ def test_cli_json(library: Path, capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_cli_missing_library_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert sl.main(["x", "--library", str(tmp_path / "none")]) == 2
+    assert sl.main(["zeolite", "--library", str(tmp_path / "none")]) == 2
     assert "見つかりません" in capsys.readouterr().err
 
 
 def test_empty_library_is_reported(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     lib = tmp_path / "md"
     lib.mkdir()
-    assert sl.main(["x", "--library", str(lib)]) == 0
+    assert sl.main(["zeolite", "--library", str(lib)]) == 0
     assert "登録済みの論文がまだありません" in capsys.readouterr().out
 
 
@@ -145,3 +145,116 @@ def test_snippet_shows_the_matching_part_of_a_long_section(tmp_path: Path) -> No
     _paper(lib, "long", "A long paper", "## 主要な結果\n" + "背景の説明。" * 80 + "Avrami 指数は 2.1 であった。\n")
     (hit,) = sl.search(sl.load_library(lib), ["Avrami"])
     assert "Avrami" in hit.snippet
+
+
+# ---------- レビューの指摘（2026-11-10）----------
+
+@pytest.mark.parametrize("text,expected", [
+    ("ΔE", ["δe"]), ("π-π stacking", ["π", "π", "stacking"]), ("α-helix", ["α", "helix"]),
+    ("Müller café", ["muller", "cafe"]),
+])
+def test_greek_and_accented_letters_are_kept(text: str, expected: list[str]) -> None:
+    assert sl.tokenize(text) == expected
+
+
+def test_hyphenated_terms_also_count_as_one_word() -> None:
+    tokens = sl.tokenize("X-ray solid-state")
+    assert "xray" in tokens and "solidstate" in tokens and "state" in tokens
+
+
+def test_a_single_kanji_query_matches_inside_longer_words(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    _paper(lib, "hikari", "光反応の研究", "## 主要な結果\n光反応で生成物が得られた。\n")
+    _paper(lib, "xrd", "X線回折による構造解析", "## 主要な結果\nX線回折で格子定数を求めた。\n")
+    assert sl.search(sl.load_library(lib), ["光"])[0].paper.path.stem == "hikari"
+    assert sl.search(sl.load_library(lib), ["X線"])[0].paper.path.stem == "xrd"
+
+
+def test_unterminated_frontmatter_keeps_its_fields(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "x.md").write_text('---\ntitle: "Foo: bar"\nauthors:\n  - A\n  - B\nyear: 2020\n# c\n\n## Results\nok\n', encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.title == "Foo: bar" and paper.authors == ("A", "B") and paper.year == "2020"
+
+
+def test_inline_lists_are_split(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "x.md").write_text('---\ntitle: "T"\nauthors: [Smith J, "Doe A"]\ntags: [solid, state]\n---\n# T\n', encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.authors == ("Smith J", "Doe A") and paper.tags == ("solid", "state")
+
+
+def test_shift_jis_files_are_read(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "sjis.md").write_bytes("# 分子結晶の研究\n\n## 主要な結果\n分子結晶で反応が進んだ。\n".encode("cp932"))
+    assert sl.search(sl.load_library(lib), ["分子結晶"])[0].paper.path.stem == "sjis"
+
+
+def test_unreadable_files_are_counted_separately(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    _paper(lib, "ok", "Readable paper", "## 本文\nhello world\n")
+    (lib / "bad.md").write_bytes(b"\x81\x7f\x81\x7f")  # UTF-8 でも cp932 でも読めない
+    sl.main(["hello", "--library", str(lib)])
+    out = capsys.readouterr().out
+    assert "登録済み 1 本" in out and "読めないファイル 1 本" in out and "bad.md" in out
+
+
+def test_metadata_bullets_are_read(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "m.md").write_text(
+        "# A bullet-style summary\n\n## Metadata\n- **Authors**: Smith, J.; Doe, A.\n- **Year**: 2021\n"
+        "- **Journal**: J. Phys. Chem.\n- **DOI**: 10.1/abc\n- **Tags**: crystal, kinetics\n\n## Summary\ntext\n",
+        encoding="utf-8",
+    )
+    (paper,) = sl.load_library(lib)
+    assert paper.year == "2021" and paper.doi == "10.1/abc" and paper.journal == "J. Phys. Chem."
+    assert paper.authors == ("Smith, J.", "Doe, A.") and paper.tags == ("crystal", "kinetics")
+
+
+def test_uppercase_md_extension_is_included(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    _paper(lib, "upper", "Upper case file", "## 本文\nzeolite synthesis\n")
+    (lib / "upper.md").rename(lib / "UPPER.MD")
+    assert sl.search(sl.load_library(lib), ["zeolite"])
+
+
+@pytest.mark.parametrize("query", ["", "the of"])
+def test_a_query_without_search_words_is_refused(library: Path, query: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert sl.main([query, "--library", str(library)]) == 2
+    assert "検索語がありません" in capsys.readouterr().err
+
+
+def test_top_must_be_positive(library: Path) -> None:
+    with pytest.raises(SystemExit):
+        sl.main(["MACE", "--library", str(library), "--top", "0"])
+
+
+def test_paths_with_spaces_are_quoted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "my lib"
+    lib.mkdir()
+    _paper(lib, "a b", "Spaced", "## 本文\nzeolite\n")
+    sl.main(["zeolite", "--library", str(lib)])
+    assert f'要約: "{lib / "a b.md"}"' in capsys.readouterr().out
+
+
+def test_snippet_stays_aligned_after_full_width_text(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    _paper(lib, "fw", "Full width", "## 本文\n" + "ＡＢＣ（株）㈱" * 40 + " target zeolite here\n")
+    (hit,) = sl.search(sl.load_library(lib), ["zeolite"])
+    assert "zeolite" in hit.snippet
+
+
+def test_snippet_finds_half_width_katakana(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    _paper(lib, "hw", "Half width", "## 本文\n" + "前置きの文。" * 40 + "ここで ﾎﾟﾘﾏｰ を合成した。\n")
+    (hit,) = sl.search(sl.load_library(lib), ["ポリマー"])
+    assert "ポリマー" in hit.snippet
