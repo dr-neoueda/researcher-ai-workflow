@@ -193,3 +193,63 @@ def test_stop_works_without_python(project: Path, tmp_path: Path, payload_extra:
         cwd=project, env=env, timeout=30,
     )
     assert res.returncode == expected, res.stderr
+
+
+# ---------- レビューの指摘（2026-11-10）----------
+
+def test_stop_without_python_reads_stop_hook_active_with_spaces(project: Path, tmp_path: Path) -> None:
+    notes = project / "office" / "secretary" / "notes"
+    (notes / f"{_today()}-decisions.md").write_text("- 決めた\n", encoding="utf-8")
+    env = {"PATH": _path_without_python(tmp_path), "CLAUDE_PROJECT_DIR": str(project), "LANG": "en_US.UTF-8"}
+    res = subprocess.run(
+        [env["PATH"] + "/bash", str(HOOKS / "learnings-reminder.sh")],
+        input='{"cwd": "x",\n "stop_hook_active" : true}', capture_output=True, text=True, cwd=project, env=env, timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+
+
+def test_deleting_a_misplaced_file_is_not_a_violation(project: Path) -> None:
+    patch = "*** Begin Patch\n*** Delete File: office/research/papers/a.md\n*** End Patch\n"
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"command": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_patch_lines_inside_written_content_are_ignored(project: Path) -> None:
+    payload = {
+        "cwd": str(project), "tool_name": "Write",
+        "tool_input": {
+            "file_path": str(project / "work" / "notes.md"),
+            "content": "例:\n*** Add File: office/research/papers/x.md\n",
+        },
+    }
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_quoted_patch_paths_are_unquoted(project: Path) -> None:
+    patch = '*** Begin Patch\n*** Add File: "office/research/papers/a b.md"\n*** End Patch\n'
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"command": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/a b.md" in res.stderr
+
+
+def test_a_stray_office_folder_above_is_not_the_project(tmp_path: Path) -> None:
+    (tmp_path / "q" / "office").mkdir(parents=True)  # raw の office/ ではない（secretary/ が無い）
+    inner = tmp_path / "q" / "office" / "x" / "proj"
+    inner.mkdir(parents=True)
+    res = run_hook("load-playbooks.sh", {"cwd": str(inner)}, cwd=inner)
+    assert res.returncode == 0 and res.stdout == ""
+
+
+def test_japanese_paths_survive_a_cp932_console(tmp_path: Path) -> None:
+    root = tmp_path / "研究 プロジェクト"
+    (root / "office" / "secretary" / "notes").mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env["PYTHONIOENCODING"] = "cp932"  # 日本語の Windows の既定に近い状態
+    payload = json.dumps({"cwd": str(root)}, ensure_ascii=False).encode("utf-8")
+    res = subprocess.run(
+        ["bash", str(HOOKS / "load-playbooks.sh")], input=payload, capture_output=True, cwd=root, env=env, timeout=30
+    )
+    assert res.returncode == 0
+    assert "研究 プロジェクト" in res.stdout.decode("utf-8")

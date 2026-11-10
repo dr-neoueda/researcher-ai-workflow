@@ -7,7 +7,7 @@
   python3 _hookio.py stop-active  Stop hook で、すでに 1 度引き戻した後なら 1、そうでなければ 0
 
 プロジェクトの場所は CLAUDE_PROJECT_DIR（Claude Code）→ 入力の cwd（両方）→ いまの場所 の順に、上へたどって
-office/ を探す。書き換えたファイルは、Claude Code の tool_input.file_path と、Codex の apply_patch のパッチの
+raw の office/（中に secretary/ がある）を探す。書き換えたファイルは、Claude Code の tool_input.file_path と、Codex の apply_patch のパッチの
 「*** Add/Update/Delete File:」「*** Move to:」の行から読む。
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
-PATCH_PATH = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+?)\s*$", re.M)
+PATCH_PATH = re.compile(r"^\*\*\* (?:(?:Add|Update) File|Move to): (.+?)\s*$", re.M)  # 削除は違反ではない
 
 
 def load(stream: Any = None) -> dict[str, Any]:
@@ -36,7 +36,7 @@ def project_root(data: dict[str, Any]) -> Path | None:
             continue
         here = Path(start).resolve()
         for candidate in (here, *here.parents):
-            if (candidate / "office").is_dir():
+            if (candidate / "office" / "secretary").is_dir():  # 別の「office」フォルダを取り違えない
                 return candidate
     return None
 
@@ -58,8 +58,9 @@ def edited_paths(data: dict[str, Any], root: Path) -> list[str]:
     raw: list[str] = []
     if isinstance(tool_input, dict) and isinstance(tool_input.get("file_path"), str):
         raw.append(tool_input["file_path"])
-    for text in _strings(tool_input):
-        raw.extend(m.group(1) for m in PATCH_PATH.finditer(text))
+    if data.get("tool_name") in (None, "apply_patch"):  # Write の本文に書いたパッチの例は読まない
+        for text in _strings(tool_input):
+            raw.extend(m.group(1).strip("\"'") for m in PATCH_PATH.finditer(text))
     base = Path(data["cwd"]) if isinstance(data.get("cwd"), str) else Path.cwd()
     out: list[str] = []
     for item in raw:
@@ -72,7 +73,16 @@ def edited_paths(data: dict[str, Any], root: Path) -> list[str]:
     return out
 
 
+def _utf8_stdio() -> None:
+    """日本語の Windows（cp932）でも、UTF-8 の JSON を読み、UTF-8 で書く。"""
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str]) -> int:
+    _utf8_stdio()
     if len(argv) != 2 or argv[1] not in ("project", "paths", "stop-active"):
         print(__doc__, file=sys.stderr)
         return 2

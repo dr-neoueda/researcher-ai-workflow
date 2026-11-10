@@ -14,8 +14,14 @@ hook_read_input() {
 hook_python() {
     local c
     for c in python3 python; do
+        command -v "$c" >/dev/null 2>&1 || continue
+        # macOS の /usr/bin/python3 は、開発ツールが無いと毎回インストールの画面を出すので使わない
+        if [ "$(command -v "$c")" = "/usr/bin/python3" ] && command -v xcode-select >/dev/null 2>&1 \
+            && ! xcode-select -p >/dev/null 2>&1; then
+            continue
+        fi
         # Windows の「python3」は Microsoft Store への案内だけのことがあるので、実際に動くかを確かめる
-        if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+        if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
             echo "$c"
             return 0
         fi
@@ -38,14 +44,13 @@ hook_project() {
     fi
     # python が無いとき: Claude Code の CLAUDE_PROJECT_DIR か、いまの場所
     root="${CLAUDE_PROJECT_DIR:-$PWD}"
-    [ -d "$root/office" ] && printf '%s' "$root"
+    [ -d "$root/office/secretary" ] && printf '%s' "$root"
     return 0
 }
 
 hook_stop_active() {
     # python が無くても読めるように、まず文字列で見る（引き戻しを繰り返さないための大事な判定）
-    case "$HOOK_INPUT" in
-        *'"stop_hook_active":true'*|*'"stop_hook_active": true'*) return 0 ;;
-    esac
+    local re='"stop_hook_active"[[:space:]]*:[[:space:]]*true'
+    [[ $HOOK_INPUT =~ $re ]] && return 0
     [ "$(hook_io stop-active 2>/dev/null)" = "1" ]
 }

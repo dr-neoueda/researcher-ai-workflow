@@ -15,6 +15,7 @@
 - 入力の JSON を jq で読んでいた（jq が無い環境では置き場所の見張りが何もしなかった）。同梱の `_hookio.py`（Python）で読む。Codex の `apply_patch` のパッチから書き込み先を読む
 - プロジェクトの場所を、JSON の `cwd` から上へたどって探す（Codex には `CLAUDE_PROJECT_DIR` が無い。サブフォルダで起動しても見つかる）
 - macOS の bash 3.2 で、日本語の直前の変数（`$today）`）が文字化けしていた
+- レビューの指摘: 日本語の Windows（cp932）でも UTF-8 で読み書きする／Python が無くても `stop_hook_active` を空白の入り方によらず読む／削除のパッチ（Delete File）と Write の本文に書いたパッチの例は警告しない／引用符つきのパスを読む／`office/secretary/` のあるフォルダだけをプロジェクトとみなす（別の「office」を取り違えない）／開発ツールの無い macOS の /usr/bin/python3 を使わない（毎回のインストール画面を出さない）
 
 ## [2.1.0 / Codex 2.1.0] - 2026-11-10
 
