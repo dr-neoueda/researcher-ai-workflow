@@ -936,3 +936,43 @@ def test_markdown_bullets_are_not_minus_signs(tmp_path: Path) -> None:
     p = tmp_path / "facts.md"
     p.write_text("- 150.8 °C までの最大\n* 0.5 と + 0.25\n- −0.3 は負\n", encoding="utf-8")
     assert [str(n.mantissa) for n in cn.read_numbers(p)] == ["150.8", "0.5", "0.25", "-0.3"]
+
+
+# ---------- 5 周目のレビューの指摘（2026-11-10）----------
+
+@pytest.mark.parametrize("text", ["1.2⋅10⁻³", "1.2∙10⁻³", "1.2 ⨯ 10⁻³", "1.2⨉10⁻³"])
+def test_more_multiplication_signs(text: str) -> None:
+    assert _values(text) == ["1.2e-3"]
+
+
+@pytest.mark.parametrize("text", [
+    "1.2\\,\\times\\,10^{-3}", "1.2~\\times~10^{-3}", "1.2 $\\times$ 10$^{-3}$", "1.2 $\\times$ 10\\textsuperscript{-3}",
+    "$1.2\\ \\times\\ 10^{-3}$",
+])
+def test_latex_spacing_around_times(text: str) -> None:
+    assert _values(text) == ["1.2e-3"]
+
+
+def test_docx_typed_bullet_is_not_a_minus(tmp_path: Path) -> None:
+    body = "<w:p><w:r><w:t>- 0.52 eV の吸収</w:t></w:r></w:p><w:p><w:r><w:t>ΔE = −0.31 eV</w:t></w:r></w:p>"
+    assert [str(n.mantissa) for n in cn.read_numbers(_docx(tmp_path, body))] == ["0.52", "-0.31"]
+
+
+@pytest.mark.parametrize("text", ["ΔG ＝ − 0.52 eV", "ΔG：− 0.52 eV"])
+def test_full_width_equals_before_a_spaced_minus(text: str) -> None:
+    assert _values(text) == ["-0.52e0"]
+
+
+@pytest.mark.parametrize("line", ["\\sisetup{table-format=2.3}", "\\rowcolor[gray]{0.9}", "\\cellcolor[gray]{0.9}", "\\arrayrulecolor[gray]{0.5}"])
+def test_more_tex_table_layout(tmp_path: Path, line: str) -> None:
+    assert _tex_numbers(tmp_path, line + " 値は 31.44\n") == ["31.44"]
+
+
+@pytest.mark.parametrize("text,expected", [("2.5 – 3.5 × 10³", ["2.5e3", "3.5e3"]), ("0.5 to 1.5 × 10⁻³ M", ["0.5e-3", "1.5e-3"])])
+def test_spaced_ranges_share_the_exponent(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize("text", ["S1-3.2×10⁻³", "Run3-1.0×10⁻³"])
+def test_an_identifier_before_a_range_dash_gets_no_exponent(text: str) -> None:
+    assert [v for v in _values(text) if v.startswith("1e") or v.startswith("3e")] == []

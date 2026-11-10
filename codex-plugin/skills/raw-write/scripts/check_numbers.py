@@ -107,8 +107,9 @@ _UNIT_GAP = r"\s*(?:[^\d\s、。,;()\u3040-\u309f]{1,8}\s*)?"  # 単位（kcal/m
 _UPPER_AFTER = re.compile(_UNIT_GAP + r"(?:以下|未満)")
 _LOWER_AFTER = re.compile(_UNIT_GAP + r"(?:以上|を超え|を上回)")
 _SIGN = r"[-+−–‐‑]"
-_TIMES = r"(?:[×✕·*xX]|\\times|\\cdot)"
-_TIMES_NO_LETTER = r"(?:[×✕·*]|\\times|\\cdot)"
+_TIMES = r"(?:[×✕·⋅∙⨯⨉*xX]|\\times|\\cdot)"
+_TIMES_NO_LETTER = r"(?:[×✕·⋅∙⨯⨉*]|\\times|\\cdot)"
+_TEX_TIMES = re.compile(r"(?:[\s~]|\\[,;: ])*\$?\s*\\(?:times|cdot)\s*\$?(?:[\s~]|\\[,;: ])*")  # 1.2\,\times\,10・1.2 $\times$ 10
 _CARET = r"\s*\$?\s*\^\s*[{(]?\s*"  # 10^-3・10^{-3}・10$^{-3}$・10^(-3)
 _LENGTH_UNIT = r"(?:mm|cm|µm|μm|um|nm|pm|m|in|px|pt)\b"
 _EXPONENT = (
@@ -132,9 +133,10 @@ _MINUS_SPELLINGS = (
     (re.compile(r"&minus;|&#8722;|&#x2212;", re.I), "−"),
     (re.compile(r"\\(?:textminus|minus)\b\s*"), "−"),
     (re.compile(r"([-−])\s*\\[,;:! ]\s*"), r"\1"),  # $-\,0.52$
-    (re.compile(r"((?:^|[=(≈:（])\s*)([-−])\s+(?=\.?\d)"), r"\1\2"),  # 「= − 0.52」「(− 0.52)」（引き算の 1.2 − 0.5 は除く）
+    (re.compile(r"((?:^|[=(≈:（＝：])\s*)([-−])\s+(?=\.?\d)"), r"\1\2"),  # 「= − 0.52」「(− 0.52)」（引き算の 1.2 − 0.5 は除く）
 )
 _RANGE_BETWEEN = re.compile(r"\s*$")
+_RANGE_WORD = re.compile(r"\s*[-–—~〜]\s*$|\s+to\s+$")  # 「2.5 – 3.5 × 10³」「0.5 to 1.5 × 10⁻³」
 
 _TEX_COMMENT = re.compile(r"(?<!\\)%.*$")
 _TEX_REF = re.compile(
@@ -155,6 +157,7 @@ _TEX_LAYOUT_ARGS = {
     "hspace": 1, "vspace": 1, "setlength": 2, "addtolength": 2, "rule": 2, "raisebox": 1, "parbox": 1,
     "scalebox": 1, "resizebox": 2, "fontsize": 2, "definecolor": 3, "textcolor": 1, "color": 1, "colorbox": 1,
     "geometry": 1, "usepackage": 1, "documentclass": 1, "linespread": 1, "setstretch": 1,
+    "sisetup": 1, "rowcolor": 1, "cellcolor": 1, "arrayrulecolor": 1,
 }
 _TEX_LAYOUT = tuple(
     re.compile(rf"\\{name}(?![A-Za-z])\*?(?:\[[^\]]*\])*" + r"(?:\{[^}]*\})" * n)
@@ -228,6 +231,7 @@ def _join_thin_groups(m: re.Match[str]) -> str:
 def normalize(text: str) -> str:
     """上付き（⁻³・<sup>・\\textsuperscript）を ^ に直し、細い空白の桁区切りを詰め、NFKC で全角を半角にする。"""
     text = _TEX_SUP.sub(r"^{\1}", _HTML_SUP.sub(r"^{\1}", text))
+    text = _TEX_TIMES.sub(" × ", text)
     text = _SUPERSCRIPT_RUN.sub(lambda m: "^" + m.group(0).translate(_SUPERSCRIPT), text)
     text = _THIN_GROUP.sub(_join_thin_groups, text)
     text = text.replace("{-}", "-").replace("{−}", "−")
@@ -425,10 +429,12 @@ def _range_exponent(match: re.Match[str], following: re.Match[str] | None, next_
     """「1–3 × 10⁻³」「0.5–1.5 × 10⁻³」の左端は、右端の指数を共有する。共有する指数（無ければ None）。"""
     if following is None or next_number is None or next_number.exponent == 0 or _exponent_text(match) is not None:
         return None
-    sign = following.group("sign")
-    if sign not in ("-", "–", "—", "‐", "‑") or not _RANGE_BETWEEN.match(line[match.end() : following.start()]):
-        return None
-    return next_number.exponent
+    if _is_ascii_letter(_char_before(line, match.start())):
+        return None  # S1-3.2×10⁻³ の 1 は識別子の一部
+    sign, between = following.group("sign"), line[match.end() : following.start()]
+    dash_as_sign = sign in ("-", "–", "—", "‐", "‑") and _RANGE_BETWEEN.match(between)
+    spaced = sign is None and _RANGE_WORD.match(between)
+    return next_number.exponent if (dash_as_sign or spaced) else None
 
 
 def _match_at(mantissa: Decimal, decimals: int, target: Decimal, bound: Bound | None) -> Status:
@@ -716,7 +722,8 @@ def read_lines(path: Path) -> list[tuple[str, str]]:
         return _text_lines(path)
     if suffix in ZIP_SUFFIXES:
         with zipfile.ZipFile(path) as z:
-            return _docx_lines(z) if suffix == ".docx" else _pptx_lines(z)
+            lines = _docx_lines(z) if suffix == ".docx" else _pptx_lines(z)
+        return [(loc, _LIST_MARKER.sub(" ", text, count=1)) for loc, text in lines]  # 手で打った「- 」は箇条書きの印
     supported = " ".join(sorted(TEXT_SUFFIXES | TABLE_SUFFIXES | ZIP_SUFFIXES))
     raise ValueError(f"対応していない形式です: {suffix or '(拡張子なし)'}（対応: {supported}）")
 
