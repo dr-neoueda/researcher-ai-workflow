@@ -2,7 +2,7 @@
 
 > **研究者のための AI エージェント導入伴走** — 電気通信大学 SPRING リカレント・リスキリング商品
 
-**配布版：plugin 2.0.1 / Codex 2.0.1 / Copilot 1.46.0（保留中・旧名 caw）/ Gemini 1.49.0（凍結）**
+**配布版：plugin 2.1.0 / Codex 2.1.0 / Copilot 1.46.0（保留中・旧名 caw）/ Gemini 1.49.0（凍結）**
 現状と次の一手は [`RESUME.md`](./RESUME.md)、変更の全履歴は [`CHANGELOG.md`](./CHANGELOG.md) を参照。
 
 > **プラグイン `raw` は無料です。** 商品はプラグインそのものではなく、研究者が自分の研究に合わせて
@@ -81,7 +81,7 @@ codex plugin add raw@researcher-ai-workflow
 | `/raw` | オンボーディング（研究プロファイル聴取 → 9 部署 + `work/` を一括生成）→ 以後は運営モード |
 | `/raw-research` | 関心テーマの論文検索（arXiv / Crossref / Semantic Scholar / OpenAlex / PubMed）→ クリック可能な HTML リスト |
 | `/raw-register` | 入手済み PDF → 書誌付き要約 md → ナレッジベース（Notion / Obsidian 等）+ クラウドストレージへ登録 |
-| `/raw-write` | 登録済み文献を引用源に、論文・申請書・学会要旨を**本人の文体**で執筆 |
+| `/raw-write` | 登録済み文献を引用源に、論文・申請書・学会要旨を**本人の文体**で執筆。本文の数は事実の一覧と機械で照合 |
 | `/raw-input` | 7 ソフト（Gaussian / ORCA / CP2K / GROMACS / VASP / Quantum ESPRESSO / ChimeraX）の入力雛形 + ジョブ記録 |
 | `/raw-playbook` | 計算 log の解析 → Lessons Learned 起案 → Playbook 追記。過去データの一括取り込みにも対応 |
 | `/raw-analyze` | 手法非依存の解析コンパニオン（生データ → 数値化後の下流定量解析） |

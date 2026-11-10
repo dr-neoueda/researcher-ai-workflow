@@ -49,7 +49,7 @@ trigger: /raw-intake
 | 自分のスライド・ポスター | `.pptx`・発表資料 | §研究抽出 → `work/presentations/_style.md`（＋研究プロファイル） |
 | CV・業績リスト | 経歴・publication list・受賞/グラント | §研究抽出 → `work/profile/cv.md`・`work/profile/publications.md` |
 | 計算入出力 | `.gjf`/`.log`/`.com`/`.inp`/`.out` 等・計算ソフト書式 | **raw-playbook の `_past-data/` 取り込みへ委譲**（汎関数・基底・収束傾向を Playbook に seed） |
-| 測定データ（NMR/XRD/IR/DSC の raw） | 装置出力形式 | `work/analyses/` に整理を提案 ＋ 手法傾向を `work/profile/methods.md` に記録 |
+| 測定データ（NMR/XRD/IR/DSC などの生データ） | 装置出力形式 | §測定データの取り込み → `work/experiments/<試料 ID>/<手法>/` ＋ 測定の記録 `info.md` ＋ 手法の傾向を `work/profile/methods.md` に記録 |
 | 判定できない | — | ユーザーに「これは何の資料ですか？」と確認 |
 
 #### 就活トラックの分類 → 処理
@@ -66,6 +66,7 @@ trigger: /raw-intake
 分類に従って処理する：
 
 - **自分で抽出する分**（自分の論文/スライド/CV → 研究抽出、ES/履歴書 → 就活抽出）は、§研究抽出 / §就活抽出 の書き分け表に従ってその場で実行する。
+- **測定データ**は §測定データの取り込み の手順で、試料ごとのフォルダへ移して測定の記録を作る（試料 ID・手法・条件を必ず確かめる）。
 - **専門スキルに渡す分**は、そのスキルの処理に回す：外部論文 → `raw-register`、計算入出力 → `raw-playbook`、企業情報 → `raw-research`。はじめてモードでは、ユーザーに「外部論文は登録、計算は Playbook 取り込みに回します」と平易に伝えてから実行/提案する。
 - 1 つのファイルが複数に該当する場合（例: 自分の論文＝文体素材かつ業績）、**両方に反映**する。
 
@@ -84,10 +85,22 @@ trigger: /raw-intake
 | 自分のスライド・ポスター | `work/presentations/_source/` |
 | CV・業績リスト | `work/profile/_source/` |
 | 計算入出力 | `work/<ソフト>/_past-data/`（`raw-playbook` が傾向を取り込み） |
-| 測定 raw（NMR/XRD/IR/DSC 等） | `work/analyses/<topic>/_source/` |
+| 測定の生データ（NMR/XRD/IR/DSC 等） | `work/experiments/<試料 ID>/<手法>/`（§測定データの取り込み。コピーでなく移す） |
 | 判定不能・要確認 | `inbox/` に残す（移動しない） |
 - 判定に迷った分はまとめて確認する。
 - 次の一歩を 1 つ提示（研究例「これで raw-write が本人の文体・文脈で論文・申請書を書けます」／就活例「raw-es が本人の文体・実績で ES を書けます」）。
+
+---
+
+## §測定データの取り込み（生データ → `work/experiments/<試料 ID>/<手法>/`）
+
+分類で「測定データ」と判定したものは、実験部の規約（`office/experiment/` の設定ファイル）に沿って、試料ごとのフォルダへ移す。
+
+1. **確かめる**：試料 ID・手法・条件（温度・波長など）・測定日をユーザーに聞く。ファイル名や中身から推定できても、推定のまま決めない。測定日が分からなければファイルの更新日時から推定し、「推定」と記録に書く。複数の試料・測定が混ざっていれば、どれをどこへ入れるかを一覧で見せて確かめる。
+2. **置き場を決める**：`work/experiments/<試料 ID>/<手法>/`。同じ試料の別条件は `<手法>/<試料 ID>_<条件>/` で分ける。手法のフォルダ名は既存の名前に揃える（先に `work/experiments/*/` を一覧して確かめる）。校正データ（標準試料など）は `work/experiments/_calibration/<日付>_<装置>/`。
+3. **数えてから移す**：移す前のファイル数を数える → `mv` で移す（コピーして元を残さない。`rm` しない）→ 移した後に置き場の数と `inbox/` の残りを数え、一致を確かめる。
+4. **測定の記録を作る**：置き場に `info.md`（雛形 `office/experiment/templates/measurement-info.md`）を作り、聞いた条件・装置・ファイル一覧・移動前後のファイル数を書く。条件の値には単位を付ける。
+5. **報告する**：「N 個を `work/experiments/…` へ移した（移動前 N 個・移動後 N 個・inbox の残り M 個）」と数で報告する。解析が続くなら `raw-analyze` に渡す。
 
 ---
 
@@ -141,4 +154,4 @@ raw-write・raw-slides・raw-input がこの出力を読んで本人の文体・
 - **既存ファイルは上書きしない**。追記マージし、重複・矛盾は統合またはユーザー確認で解消する。
 - **事実を歪めない**。原資料の記述をそのまま素材化し、誇張・捏造を足さない。
 - **抽出結果は専用ファイルに書き出す**。部署や `office/` の `AGENTS.md`（`CLAUDE.md`）は**書き換えない**。
-- 原本は**種類別 `_source/` へ `mv`**（Step 3 の表。外部論文は `work/papers/pdf/`、計算は `_past-data/`）して `inbox/` を空にする（`rm` しない＝可逆・判定不能は残す）。抽出した成果物（`work/profile/`・`work/self-analysis/`・`work/manuscripts/_style/` 等）は `work/` 配下 に置く（`office/` 配下に書かない）。
+- 原本は**種類別 `_source/` へ `mv`**（Step 3 の表。外部論文は `work/papers/pdf/`、計算は `_past-data/`、測定データは `work/experiments/<試料 ID>/<手法>/`）して `inbox/` を空にする（`rm` しない＝可逆・判定不能は残す）。抽出した成果物（`work/profile/`・`work/self-analysis/`・`work/manuscripts/_style/` 等）は `work/` 配下 に置く（`office/` 配下に書かない）。

@@ -252,7 +252,7 @@ type: daily
 
 ## 5. experiment（実験部）
 
-**サブディレクトリ**: `notebook/`, `inventory/`, `safety/`
+**サブディレクトリ**: `notebook/`, `inventory/`, `safety/`, `templates/`
 
 ### experiment/CLAUDE.md
 
@@ -273,7 +273,13 @@ type: daily
 - **試料・試薬・部品の在庫**: `inventory/` に台帳（試料 ID・入手先・量・保管場所・危険性）
 - **安全**: `safety/` に SDS 参照・装置の安全手順・リスク評価・廃棄区分（遺伝子組換え・動物実験などの承認番号もここに記録）
 - **測定スケジュール**: 装置予約・ビームタイム等を記録
-- 測定の生データは `work/experiments/<sample-id>/<technique>/` の規約に沿って配置し、**定量・解析は analysis（raw-analyze）へ**渡す
+- **測定データの置き場（1 試料 1 フォルダ）**: `work/experiments/<試料 ID>/<手法>/`（例 `work/experiments/S-001/pxrd/`）。手法のフォルダ名は小文字とハイフン（`pxrd`・`dsc`・`nmr`・`tg-dta` など）で、新しい手法は使い始めたときに名前を決めて以後揃える。同じ試料の別条件（温度・波長など）は `<手法>/<試料 ID>_<条件>/` で分ける。試料に紐づかない校正データ（標準試料など）は `work/experiments/_calibration/<日付>_<装置>/`
+- **取り込みの手順**（`inbox/` に置かれた生データを上の置き場へ。`raw-intake` が行う）:
+  1. 試料 ID・手法・条件・測定日をユーザーに確かめる（測定日が分からなければファイルの更新日時から推定し、推定だと記録に書く）
+  2. 置き場へ**移す**（コピーして元を残さない。消さない）
+  3. 置き場に測定の記録 `info.md` を作る（雛形 `office/experiment/templates/measurement-info.md`。条件の値には単位を付ける）
+  4. **移す前と後のファイル数を数えて一致を確かめ**、数を報告する
+- **定量・解析は analysis（raw-analyze）へ**渡す（読むのは `work/experiments/<試料 ID>/<手法>/`、結果は `work/analyses/` へ）
 - **科学判断（実験計画・条件の是非・手法選定）はユーザーが決める**。実験部は記録・整理・段取りを助ける協働者に徹する
 
 ## フォルダ構成
@@ -281,6 +287,50 @@ type: daily
 - `notebook/` - 電子実験ノート（日付別）
 - `inventory/` - 試料・試薬・部品の在庫台帳
 - `safety/` - SDS・装置の安全手順・リスクアセスメント・廃棄区分・承認番号
+- `templates/` - 測定の記録（`info.md`）の雛形
+```
+
+### experiment/templates/measurement-info.md
+
+```markdown
+---
+sample: "<試料 ID>"
+material: "<物質・試料の簡単な説明>"
+technique: "<手法のフォルダ名（例: pxrd・dsc・nmr）>"
+date: "<YYYY-MM-DD（推定なら「推定」と書く）>"
+instrument: "<装置名・型番 / 施設>"
+operator: "<測定者>"
+---
+
+# <試料 ID> — <手法>（<YYYY-MM-DD>）
+
+## 測定条件
+
+<!-- 手法に応じて行を増減する。値には必ず単位を書く -->
+
+| 項目 | 値 |
+|---|---|
+| 温度 | <例: 25 °C> |
+| 雰囲気・溶媒 | <例: N₂ 50 mL/min / CDCl₃> |
+| 試料量 | <例: 3.2 mg> |
+| 測定時間・速度 | <例: 10 °C/min / 60 s × 5> |
+| その他 | <波長・倍率・周波数など、手法ごとの条件> |
+
+## 生データ
+
+- 移動元: `inbox/<元のファイル名・フォルダ名>`
+- 移動先: `<このフォルダ>`
+- ファイル: <主なファイル。多ければ「.csv × 12」のように要約>
+- ファイル数: 移動前 <N> 個 / 移動後 <N> 個
+
+## 備考
+
+<試料の状態・測定中の気づき・異常・再測定の有無など>
+
+## 関連
+
+- 解析: <`work/analyses/` の結果>
+- 実験ノート: <`office/experiment/notebook/` の該当日>
 ```
 
 ---

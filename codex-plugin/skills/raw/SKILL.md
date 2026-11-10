@@ -129,7 +129,7 @@ Q1 の回答に応じて中分類の選択肢を出す（下表。各群 4 個�
 - 同梱の Playbook の出発点（`references/playbook-starters.md`）があるのは主に化学・材料の計算ソフト。**それ以外のソフトも名指しすれば同じように Playbook とフォルダを作る**（出発点は空。初めて使うときに web 種まきを 1 回だけ提案し、使うたびに育つ）
 
 - **ディレクトリ・Playbook は、ここ（＋Call 3 の論文）で名指しされたツールについてのみ作る**。MLIP を挙げたら `work/mlip/`（**利用も訓練/fine-tune も**扱う）。
-- 「計算は使わない / 主に実験中心」を選んだら計算ディレクトリは作らず、実験記録用 `work/experiments/` の要否を `AskUserQuestion` で 1 問だけ確認（既定 Yes）。
+- 「計算は使わない / 主に実験中心」を選んだら計算ディレクトリは作らない。測定データ用の `work/experiments/` は全員に作るので、要否は尋ねない。
 
 #### Call 5: 標準化項目（環境に直結・1 回で 4 問）
 
@@ -186,13 +186,12 @@ Call 1〜6 の回答から `.raw-scaffold.json`（プロジェクト直下・一
   "knowledge_base": "<Call 5 文献管理: Notion / Obsidian / Logseq / 空>",
   "cloud_storage": "<Call 5 クラウド: Google Drive / Dropbox / OneDrive / 空>",
   "personalization_notes": "<Call 1〜4 から派生した運用ヒントを箇条書き 2〜4 行。claude-md-template.md の『パーソナライズメモ生成ガイド』の例に倣う>",
-  "tools": ["<Call 4/Call 3 で名指しされた計算ツールのみ。表示名でよい（例 'Quantum ESPRESSO'）。スクリプトが lowercase-kebab に正規化>"],
-  "wants_experiment_dir": false
+  "tools": ["<Call 4/Call 3 で名指しされた計算ツールのみ。表示名でよい（例 'Quantum ESPRESSO'）。スクリプトが lowercase-kebab に正規化>"]
 }
 ```
 
 - `field_group` は上の 5 つのどれかを**この表記のまま**書く（表記が違うと scaffold は何も書かずに止まる。止まったら表記を直して再実行）。空なら `共通` になる。
-- `tools` は **名指しされたものだけ**（一覧の全ソフトは入れない）。**1 ソフト 1 要素**で、英数字の名前を書く（例：`"AlphaFold"`・`"R"`・`"MATLAB"`。「AlphaFold・ColabFold」のように「・」でつないだ表示名はソフトごとに分ける。分けないと scaffold は名前を挙げて止まる）。「計算は使わない / 主に実験中心」なら `tools` を `[]`、`wants_experiment_dir` を `true` にする。
+- `tools` は **名指しされたものだけ**（一覧の全ソフトは入れない）。**1 ソフト 1 要素**で、英数字の名前を書く（例：`"AlphaFold"`・`"R"`・`"MATLAB"`。「AlphaFold・ColabFold」のように「・」でつないだ表示名はソフトごとに分ける。分けないと scaffold は名前を挙げて止まる）。「計算は使わない / 主に実験中心」なら `tools` を `[]` にする。
 - `personalization_notes` はモデルが生成する（ここだけ知的作業）。**API key 等の秘匿情報は入れない**。
 
 #### 3-2. scaffold スクリプトを実行
@@ -416,7 +415,7 @@ AI 部署の運営記録を集約する場所。**`office/` は先頭ドット�
 | `work/scripts/` | 単発・一時スクリプト | engineering |
 | `work/tools/` | 再利用される本格的なツール | engineering |
 | `work/reports/` | 報告書、調査結果まとめ | research / analysis |
-| `work/experiments/` | 実験記録（実験中心の研究で生成） | （実験部・将来追加） |
+| `work/experiments/` | 測定データ（`<試料 ID>/<手法>/` に生データと測定の記録 `info.md`。常に作る） | 実験部・`raw-intake` |
 | `work/<ツール名>/`（例：`work/gaussian/`・`work/openfoam/`） | 計算ソフトの入出力 | computation |
 
 ### 禁則
