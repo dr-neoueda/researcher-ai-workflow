@@ -20,7 +20,9 @@
 line 42、12 行目）・識別子（B3LYP、def2-SVP、run_0.5）・単位の指数（cm-1、s⁻¹）・上付きの整数、LaTeX の引用・参照・
 コメント・図の幅や色や行間などの組版の指定。このうち小数に見えるのに読まなかったものは「読まなかった小数」として挙げる
 （黙って捨てない）。読む範囲: .docx は本文・表・テキストボックス・数式・脚注・文末脚注（ヘッダー・フッター・コメントは
-読まない）、.pptx はスライド・数式・発表者ノート（グラフの中のデータは読まない）。小数点のカンマ（0,52）と普通の空白の
+読まない）、.pptx はスライド・数式・発表者ノート。上付きは書式・文字スタイル・位置の上げのどれでも指数として読み、上付きが
+失われて「1.2×103」のようにくっついたものは「指数が読めない」として挙げる。グラフ・SmartArt・埋め込み・図（画像）の中の数は
+読まず、その部品があれば（参考）として知らせる。小数点のカンマ（0,52）と普通の空白の
 桁区切り（1 234.5）は読めないので、小数点はピリオドで、桁区切りはカンマか細い空白で書く。
 
 対応する形式: .md .markdown .txt .tex .csv .tsv .docx .pptx（テキストは UTF-8。BOM つきも可）
@@ -31,6 +33,8 @@ line 42、12 行目）・識別子（B3LYP、def2-SVP、run_0.5）・単位の�
 from __future__ import annotations
 
 import argparse
+import bisect
+import dataclasses
 import re
 import sys
 import unicodedata
@@ -78,12 +82,12 @@ _URL_CHARS = r"[^\s|,;<>\"'()\[\]\u0080-\U0010ffff]+"  # 日本語・表の区�
 _NOISE = (
     re.compile(r"https?://" + _URL_CHARS),  # URL
     re.compile(r"\b10\.\d{4,9}/" + _URL_CHARS),  # DOI
-    re.compile(r"\]\((?:[^)\s]*[/#:][^)\s]*|[^)\s]*\.[A-Za-z]{2,5})\)"),  # Markdown のリンク先（パス・URL）
-    re.compile(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b"),  # 日付 2026-10-27
+    re.compile(r"\]\((?=[^)]*[A-Za-z])(?:[^)\s]*[/#:][^)\s]*|[^)\s]*\.[A-Za-z]{2,5})\)"),  # Markdown のリンク先
+    re.compile(r"(?<![\d.])\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b"),  # 日付 2026-10-27（0.1234-5-6 の中は日付ではない）
     re.compile(r"\d{4}年\d{1,2}月(?:\d{1,2}日)?"),  # 日付 2026年11月10日
     re.compile(r"\[\d+(?:\s*[,–-]\s*\d+)*\]"),  # 文献番号 [12] [3,4] [5–7]
 )
-_LIST_MARKER = re.compile(r"^\s*(?:>+\s*)*(?:\d+[.)]\s+)?")  # 引用の > と番号付き箇条書きの番号
+_LIST_MARKER = re.compile(r"^\s*(?:>+\s*)*(?:(?:\d+[.)]|[-*+•・])\s+)?")  # 引用の > と箇条書きの印（- は負の符号ではない）
 _LABEL_BEFORE = re.compile(
     r"(?:\b(?:Fig(?:ure)?s?|Tables?|Schemes?|Sections?|Sec|Eqs?|Equations?|Chapters?|Python|[Vv]ersion|[Vv]er|v|Rev"
     r"|lines?|pages?|pp|slides?|refs?|Nos?)\.?|\bp\.|#"
@@ -111,7 +115,8 @@ _EXPONENT = (
     rf"(?:\s?[eE](?P<eexp>{_SIGN}?\d+)"
     rf"|\s*{_TIMES}\s*10{_CARET}(?P<texp>{_SIGN}?\d+)\s*[}})]?"
     rf"|\s*{_TIMES_NO_LETTER}\s*10\s*(?P<nexp>{_SIGN}\s*\d+)(?!\d)"
-    rf"|\s*[xX]\s*10(?P<xexp>[-−–‐‑]\d+)(?!\d)(?!\s*{_LENGTH_UNIT}))?"  # 5 x 10-3 M は指数、0.5 x 10-20 mm は寸法
+    rf"|\s*[xX]\s*10(?P<xexp>[-−–‐‑]\d+)(?!\d)(?!\s*{_LENGTH_UNIT})"  # 5 x 10-3 M は指数、0.5 x 10-20 mm は寸法
+    rf"|{_TIMES_NO_LETTER}10(?P<gexp>(?!0+(?!\d))\d{{1,2}})(?!\d))?"  # 1.2×103: 上付きが失われた指数（読めないとして挙げる）
 )
 _MANTISSA_GROUPED = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![.\d])\.\d+"
 _MANTISSA_PLAIN = r"\d+(?:\.\d+)?|(?<![.\d])\.\d+"
@@ -121,6 +126,15 @@ _BARE_POWER = re.compile(rf"{_CARET}({_SIGN}?\d+)\s*[}})]?")
 _DOTTED = re.compile(r"\.\d")
 _DECIMAL_COMMA = re.compile(r"(?<![\d,.])\d+,\d{1,2}(?![\d,])")
 _MINUS_LIKE = str.maketrans("−–‐‑", "----")
+MAX_EXPONENT_DIGITS = 6
+_MINUS_SPELLINGS = (
+    (re.compile(r"\$[-−]\$"), "−"),  # $-$0.52（ACS 系の LaTeX）
+    (re.compile(r"&minus;|&#8722;|&#x2212;", re.I), "−"),
+    (re.compile(r"\\(?:textminus|minus)\b\s*"), "−"),
+    (re.compile(r"([-−])\s*\\[,;:! ]\s*"), r"\1"),  # $-\,0.52$
+    (re.compile(r"((?:^|[=(≈:（])\s*)([-−])\s+(?=\.?\d)"), r"\1\2"),  # 「= − 0.52」「(− 0.52)」（引き算の 1.2 − 0.5 は除く）
+)
+_RANGE_BETWEEN = re.compile(r"\s*$")
 
 _TEX_COMMENT = re.compile(r"(?<!\\)%.*$")
 _TEX_REF = re.compile(
@@ -217,6 +231,8 @@ def normalize(text: str) -> str:
     text = _SUPERSCRIPT_RUN.sub(lambda m: "^" + m.group(0).translate(_SUPERSCRIPT), text)
     text = _THIN_GROUP.sub(_join_thin_groups, text)
     text = text.replace("{-}", "-").replace("{−}", "−")
+    for pattern, replacement in _MINUS_SPELLINGS:
+        text = pattern.sub(replacement, text)
     return unicodedata.normalize("NFKC", text)
 
 
@@ -301,9 +317,13 @@ def _fmt(value: Decimal) -> str:
 def _to_number(match: re.Match[str], sign: str, location: str, bound: Bound | None) -> Number:
     mant = match.group("mant").replace(",", "")
     exp_text = _exponent_text(match)
-    exponent = int(exp_text) if exp_text else 0
     decimals = len(mant.split(".")[1]) if "." in mant else 0
     mantissa = Decimal(sign + (mant if not mant.startswith(".") else "0" + mant))
+    if match.group("gexp") is not None:
+        return Number(f"{_fmt(mantissa)}×10{match.group('gexp')}", mantissa, 0, decimals, location, bound, unreadable=True)
+    if exp_text and len(exp_text.lstrip("+-")) > MAX_EXPONENT_DIGITS:
+        return Number(f"{_fmt(mantissa)}×10^…", mantissa, 0, decimals, location, bound, unreadable=True)
+    exponent = int(exp_text) if exp_text else 0
     if abs(exponent) > MAX_EXPONENT:
         return Number(f"{_fmt(mantissa)}×10^{exponent}", mantissa, 0, decimals, location, bound, unreadable=True)
     shown = f"{_fmt(mantissa)}×10^{exponent}" if exp_text else _fmt(mantissa)
@@ -317,8 +337,11 @@ def _bare_power(match: re.Match[str], line: str, sign: str, location: str, bound
     power = _BARE_POWER.match(line, match.end())
     if power is None:
         return None
-    exponent = int(power.group(1).translate(_MINUS_LIKE))
+    digits = power.group(1).translate(_MINUS_LIKE)
     mantissa = Decimal(sign + "1")
+    if len(digits.lstrip("+-")) > MAX_EXPONENT_DIGITS:
+        return Number("10^…", mantissa, 0, 0, location, bound, unreadable=True)
+    exponent = int(digits)
     if abs(exponent) > MAX_EXPONENT:
         return Number(f"10^{exponent}", mantissa, 0, 0, location, bound, unreadable=True)
     return Number(f"10^{exponent}", mantissa, exponent, 0, location, bound)
@@ -383,14 +406,29 @@ def extract_numbers(
     """
     line = _strip_noise(normalize(text))
     pattern = _NUM_GROUPED if thousands else _NUM_PLAIN
+    matches = list(pattern.finditer(line))
+    read = [_read_one(m, line, location, include_integers) for m in matches]
     found: list[Number] = []
-    for match in pattern.finditer(line):
-        number, reason = _read_one(match, line, location, include_integers)
+    for i, (match, (number, reason)) in enumerate(zip(matches, read)):
+        shared = _range_exponent(match, matches[i + 1] if i + 1 < len(matches) else None, read[i + 1][0] if i + 1 < len(read) else None, line)
+        if shared is not None and not reason and (number is None or number.exponent == 0) and not (number and number.unreadable):
+            base = number or _to_number(match, "" if match.group("sign") is None else (_sign_of(match, line)[0] or ""), location, None)
+            number = dataclasses.replace(base, exponent=shared, text=f"{_fmt(base.mantissa)}×10^{shared}")
         if number is not None:
             found.append(number)
         elif reason and skipped is not None and ("." in match.group("mant") or _exponent_text(match)):
             skipped.append(Skipped(location, match.group(0).strip(), reason))
     return found
+
+
+def _range_exponent(match: re.Match[str], following: re.Match[str] | None, next_number: Number | None, line: str) -> int | None:
+    """「1–3 × 10⁻³」「0.5–1.5 × 10⁻³」の左端は、右端の指数を共有する。共有する指数（無ければ None）。"""
+    if following is None or next_number is None or next_number.exponent == 0 or _exponent_text(match) is not None:
+        return None
+    sign = following.group("sign")
+    if sign not in ("-", "–", "—", "‐", "‑") or not _RANGE_BETWEEN.match(line[match.end() : following.start()]):
+        return None
+    return next_number.exponent
 
 
 def _match_at(mantissa: Decimal, decimals: int, target: Decimal, bound: Bound | None) -> Status:
@@ -431,12 +469,42 @@ def _compare(number: Number, fact: Number) -> Status:
     return "exponent" if by_mantissa in ("exact", "rounded", "bound") else "missing"
 
 
-def classify(number: Number, facts: list[Number]) -> Finding:
+class FactIndex:
+    """事実の一覧の数を、値と仮数の大きさで並べた索引（一覧が大きくても照合が 2 乗の時間にならない）。"""
+
+    def __init__(self, facts: list[Number]) -> None:
+        usable = [f for f in facts if not f.unreadable]
+        self._by_value = sorted(usable, key=lambda f: abs(f.value))
+        self._values = [abs(f.value) for f in self._by_value]
+        self._by_mantissa = sorted(usable, key=lambda f: abs(f.mantissa))
+        self._mantissas = [abs(f.mantissa) for f in self._by_mantissa]
+
+    def __len__(self) -> int:
+        return len(self._by_value)
+
+    @staticmethod
+    def _window(keys: list[Decimal], items: list[Number], center: Decimal, half: Decimal) -> list[Number]:
+        lo = bisect.bisect_left(keys, center - half)
+        hi = bisect.bisect_right(keys, center + half)
+        return items[lo:hi]
+
+    def candidates(self, number: Number) -> list[Number]:
+        """一致・丸め・符号違い・指数違いになりうる数だけ（原稿の桁の 1 刻みの範囲）。"""
+        step = Decimal(1).scaleb(number.exponent - number.decimals)
+        near_value = self._window(self._values, self._by_value, abs(number.value), step)
+        mantissa_step = Decimal(1).scaleb(-number.decimals)
+        near_mantissa = self._window(self._mantissas, self._by_mantissa, abs(number.mantissa), mantissa_step)
+        seen: set[int] = set()
+        return [f for f in near_value + near_mantissa if not (id(f) in seen or seen.add(id(f)))]
+
+
+def classify(number: Number, facts: FactIndex | list[Number]) -> Finding:
     """一覧のどの数と、どの強さで一致するか。最も強い一致を返す。"""
     if number.unreadable:
         return Finding(number=number, status="exp_unread", source=None)
+    index = facts if isinstance(facts, FactIndex) else FactIndex(facts)
     best = Finding(number=number, status="missing", source=None)
-    for fact in facts:
+    for fact in index.candidates(number):
         status = _compare(number, fact)
         if RANK[status] < RANK[best.status]:
             best = Finding(number=number, status=status, source=fact.text)
@@ -473,10 +541,36 @@ def _text_lines(path: Path) -> list[tuple[str, str]]:
     return out
 
 
-def _is_superscript_run(run: ET.Element) -> bool:
+_SUP_OPEN, _SUP_CLOSE = "\x01", "\x02"  # 上付きの始まりと終わりの印（隣り合う上付きの run は 1 つにまとめる）
+_SYMBOL_CHARS = {"F02D": "−", "002D": "−", "F0B4": "×", "00B4": "×", "F0B1": "±", "00B1": "±", "F0B0": "°"}
+
+
+@dataclass(frozen=True)
+class _Ctx:
+    paragraph_tag: str
+    superscript_styles: frozenset[str] = frozenset()
+
+
+def _is_raised(props: ET.Element | None, ctx: _Ctx) -> bool:
+    if props is None:
+        return False
+    align = props.find(_W + "vertAlign")
+    style = props.find(_W + "rStyle")
+    position = props.find(_W + "position")
+    try:
+        raised = position is not None and int(position.get(_W + "val", "0")) > 0
+    except ValueError:
+        raised = False
+    return bool(
+        (align is not None and align.get(_W + "val") == "superscript")
+        or (style is not None and style.get(_W + "val") in ctx.superscript_styles)
+        or raised
+    )
+
+
+def _is_superscript_run(run: ET.Element, ctx: _Ctx) -> bool:
     if run.tag == _W + "r":
-        align = run.find(f"{_W}rPr/{_W}vertAlign")
-        return align is not None and align.get(_W + "val") == "superscript"
+        return _is_raised(run.find(_W + "rPr"), ctx)
     props = run.find(_A + "rPr")
     try:
         return props is not None and int(props.get("baseline", "0")) > 0
@@ -484,11 +578,11 @@ def _is_superscript_run(run: ET.Element) -> bool:
         return False
 
 
-def _collect(element: ET.Element, paragraph_tag: str, out: list[str]) -> None:
+def _collect(element: ET.Element, ctx: _Ctx, out: list[str]) -> None:
     """段落の文字を集める。入れ子の段落（テキストボックス）は別の段落として読むので、ここでは飛ばす。"""
     for child in element:
         tag = child.tag
-        if tag == paragraph_tag or tag in _SKIP_TAGS:
+        if tag == ctx.paragraph_tag or tag in _SKIP_TAGS:
             continue
         if tag in _TEXT_TAGS:
             out.append(child.text or "")
@@ -496,29 +590,66 @@ def _collect(element: ET.Element, paragraph_tag: str, out: list[str]) -> None:
             out.append(" ")
         elif tag == _W + "noBreakHyphen":
             out.append("‑")
+        elif tag == _W + "sym":
+            out.append(_SYMBOL_CHARS.get((child.get(_W + "char") or "").upper(), "?"))
         elif tag in (_W + "r", _A + "r"):
             inner: list[str] = []
-            _collect(child, paragraph_tag, inner)
+            _collect(child, ctx, inner)
             text = "".join(inner)
-            out.append("^" + text if text and _is_superscript_run(child) else text)  # 上付きの run は指数（10 + ^-3）
-        elif tag in (_M + "sup", _M + "sub"):
-            out.append("^" if tag == _M + "sup" else "_")
-            _collect(child, paragraph_tag, out)
+            out.append(_SUP_OPEN + text + _SUP_CLOSE if text and _is_superscript_run(child, ctx) else text)
+        elif tag == _M + "sup":
+            out.append(_SUP_OPEN)
+            _collect(child, ctx, out)
+            out.append(_SUP_CLOSE)
+        elif tag == _M + "sub":
+            out.append("_")
+            _collect(child, ctx, out)
+        elif tag in (_M + "num", _M + "den"):
+            out.append(" ")  # 分数の分子と分母をつなげない（0.5/2 が 0.52 にならない）
+            _collect(child, ctx, out)
+            out.append(" ")
         else:
-            _collect(child, paragraph_tag, out)
+            _collect(child, ctx, out)
 
 
-def _paragraph_texts(root: ET.Element, paragraph_tag: str) -> list[str]:
+def _iter_paragraphs(element: ET.Element, tag: str) -> list[ET.Element]:
+    """段落を文書の順に集める（入れ子も含む）。互換用の代わりの部分（mc:Fallback）は二重に読まないので除く。"""
+    found = []
+    for child in element:
+        if child.tag == _MC + "Fallback":
+            continue
+        if child.tag == tag:
+            found.append(child)
+        found.extend(_iter_paragraphs(child, tag))
+    return found
+
+
+def _paragraph_texts(root: ET.Element, ctx: _Ctx) -> list[str]:
     texts = []
-    for paragraph in root.iter(paragraph_tag):
+    for paragraph in _iter_paragraphs(root, ctx.paragraph_tag):
         out: list[str] = []
-        _collect(paragraph, paragraph_tag, out)
-        texts.append("".join(out))
+        _collect(paragraph, ctx, out)
+        text = "".join(out).replace(_SUP_CLOSE + _SUP_OPEN, "")  # 隣り合う上付きを 1 つに（10 + ⁻ + ³ → 10^{-3}）
+        texts.append(text.replace(_SUP_OPEN, "^{").replace(_SUP_CLOSE, "}"))
     return texts
 
 
+def _superscript_styles(z: zipfile.ZipFile) -> frozenset[str]:
+    """styles.xml で上付き（または位置を上げた）文字スタイルの ID。"""
+    if "word/styles.xml" not in z.namelist():
+        return frozenset()
+    root = ET.fromstring(z.read("word/styles.xml"))
+    plain = _Ctx(_W + "p")
+    return frozenset(
+        style.get(_W + "styleId", "")
+        for style in root.iter(_W + "style")
+        if _is_raised(style.find(_W + "rPr"), plain)
+    )
+
+
 def _docx_lines(z: zipfile.ZipFile) -> list[tuple[str, str]]:
-    body = _paragraph_texts(ET.fromstring(z.read("word/document.xml")), _W + "p")
+    ctx = _Ctx(_W + "p", _superscript_styles(z))
+    body = _paragraph_texts(ET.fromstring(z.read("word/document.xml")), ctx)
     out = [(f"段落 {i}", p) for i, p in enumerate(body, 1)]
     for part, note_tag, label in (
         ("word/footnotes.xml", _W + "footnote", "脚注"),
@@ -527,7 +658,7 @@ def _docx_lines(z: zipfile.ZipFile) -> list[tuple[str, str]]:
         if part not in z.namelist():
             continue
         notes = [n for n in ET.fromstring(z.read(part)).iter(note_tag) if n.get(_W + "type") not in _NOTE_SEPARATORS]
-        paras = [p for note in notes for p in _paragraph_texts(note, _W + "p") if p.strip()]
+        paras = [p for note in notes for p in _paragraph_texts(note, ctx) if p.strip()]
         out.extend((f"{label} {i}", p) for i, p in enumerate(paras, 1))
     return out
 
@@ -569,11 +700,12 @@ def _notes_part(z: zipfile.ZipFile, slide_part: str) -> str | None:
 
 def _pptx_lines(z: zipfile.ZipFile) -> list[tuple[str, str]]:
     out = []
+    ctx = _Ctx(_A + "p")
     for num, part in enumerate(_slide_parts(z), 1):
-        out.extend((f"スライド {num}", p) for p in _paragraph_texts(ET.fromstring(z.read(part)), _A + "p"))
+        out.extend((f"スライド {num}", p) for p in _paragraph_texts(ET.fromstring(z.read(part)), ctx))
         notes = _notes_part(z, part)
         if notes:
-            out.extend((f"ノート {num}", p) for p in _paragraph_texts(ET.fromstring(z.read(notes)), _A + "p"))
+            out.extend((f"ノート {num}", p) for p in _paragraph_texts(ET.fromstring(z.read(notes)), ctx))
     return out
 
 
@@ -609,12 +741,29 @@ def decimal_comma_spots(path: Path) -> list[str]:
     return spots
 
 
+_UNREAD_PART = re.compile(r"^(?:word|ppt)/(?:charts|diagrams|embeddings)/")
+
+
+def unread_parts(path: Path) -> int:
+    """Word・PowerPoint のグラフ・SmartArt・埋め込み（数式エディタ・表計算など）の部品の数（中の数は読まない）。"""
+    if path.suffix.lower() not in ZIP_SUFFIXES:
+        return 0
+    with zipfile.ZipFile(path) as z:
+        return sum(1 for name in z.namelist() if _UNREAD_PART.match(name) and not name.endswith((".rels", "/")))
+
+
 @dataclass(frozen=True)
 class Notes:
     """照合の結果に添える参考の情報（照合していないもの）。"""
 
     commas: list[str]
     skipped: list[Skipped]
+    unread: int = 0
+
+
+def _skipped_lines(skipped: list[Skipped]) -> list[str]:
+    head = f"（参考）読まなかった小数 {len(skipped)} 個（照合していない。本文の値が混ざっていないか目で確かめる）:"
+    return [head, *(f"  {s.location}  {s.text}（{s.reason}）" for s in skipped)]
 
 
 def _report(draft: Path, facts_paths: list[Path], findings: list[Finding], n_facts: int, notes: Notes) -> str:
@@ -628,8 +777,12 @@ def _report(draft: Path, facts_paths: list[Path], findings: list[Finding], n_fac
             out.append(f"  {f.number.location}  {f.number.text}{tail}")
     out.append(f"そのまま一致: {len(groups['exact'])}")
     if notes.skipped:
-        out.append(f"（参考）読まなかった小数 {len(notes.skipped)} 個（照合していない。本文の値が混ざっていないか目で確かめる）:")
-        out.extend(f"  {s.location}  {s.text}（{s.reason}）" for s in notes.skipped)
+        out.extend(_skipped_lines(notes.skipped))
+    if notes.unread:
+        out.append(
+            f"（参考）グラフ・SmartArt・埋め込みの部品が {notes.unread} 個あり、その中の数は照合していない。"
+            "図（画像）の中の数も読まない。目で確かめる"
+        )
     if notes.commas:
         out.append(f"（参考）小数点がカンマかもしれない箇所 {len(notes.commas)} 個: {'、'.join(notes.commas[:5])}（照合していない）")
     if any(groups[key] for key in FAILING):
@@ -670,6 +823,7 @@ def main(argv: list[str] | None = None) -> int:
         facts = [n for path in args.facts for n in read_numbers(path, include_integers=True)]
         numbers = read_numbers(args.draft, include_integers=args.integers, skipped=skipped)
         commas = decimal_comma_spots(args.draft)
+        unread = unread_parts(args.draft)
     except UnicodeDecodeError as exc:
         print(f"読めません（UTF-8 で保存し直してください）: {exc}", file=sys.stderr)
         return 2
@@ -682,9 +836,12 @@ def main(argv: list[str] | None = None) -> int:
     if not numbers:
         hint = "" if args.integers else "整数も確かめるなら --integers を付ける。"
         print(f"原稿から数が 1 つも取れませんでした（照合していません）: {args.draft}。{hint}", file=sys.stderr)
+        if skipped:
+            print("\n".join(_skipped_lines(skipped)), file=sys.stderr)
         return 2
-    findings = [classify(n, facts) for n in numbers]
-    print(_report(args.draft, args.facts, findings, len(facts), Notes(commas, skipped)))
+    index = FactIndex(facts)
+    findings = [classify(n, index) for n in numbers]
+    print(_report(args.draft, args.facts, findings, len(facts), Notes(commas, skipped, unread)))
     return 1 if any(f.status in FAILING for f in findings) else 0
 
 

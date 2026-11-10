@@ -809,3 +809,130 @@ def test_skipped_decimals_are_listed(tmp_path: Path, capsys: pytest.CaptureFixtu
 def test_maximum_and_minimum_are_values_not_bounds() -> None:
     (n,) = cn.extract_numbers("V の段は最大 0.068 %、最小 0.01", location="L1")[:1]
     assert n.bound is None
+
+
+# ---------- 4 周目のレビューの指摘（2026-11-10）----------
+
+def test_docx_superscript_split_over_runs(tmp_path: Path) -> None:
+    sup = '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+    body = f"<w:p><w:r><w:t>k = 1.2×10</w:t></w:r><w:r>{sup}<w:t>−</w:t></w:r><w:r>{sup}<w:t>3</w:t></w:r></w:p>"
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(_docx(tmp_path, body))] == ["1.2e-3"]
+
+
+def test_pptx_superscript_split_over_runs(tmp_path: Path) -> None:
+    pptx = tmp_path / "d.pptx"
+    up = '<a:rPr baseline="30000"/>'
+    slide = (
+        f"<p:sld {ALL_NS}><a:p><a:r><a:t>1.2×10</a:t></a:r><a:r>{up}<a:t>-</a:t></a:r>"
+        f"<a:r>{up}<a:t>3</a:t></a:r></a:p></p:sld>"
+    )
+    _write_zip(pptx, {"ppt/slides/slide1.xml": slide})
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(pptx)] == ["1.2e-3"]
+
+
+def test_docx_superscript_from_a_character_style(tmp_path: Path) -> None:
+    path = tmp_path / "d.docx"
+    styles = (
+        f'<w:styles {ALL_NS}><w:style w:type="character" w:styleId="Sup"><w:rPr><w:vertAlign w:val="superscript"/>'
+        "</w:rPr></w:style></w:styles>"
+    )
+    body = '<w:p><w:r><w:t>k=1.2×10</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Sup"/></w:rPr><w:t>3</w:t></w:r></w:p>'
+    _write_zip(path, {"word/document.xml": f"<w:document {ALL_NS}><w:body>{body}</w:body></w:document>",
+                      "word/styles.xml": styles})
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(path)] == ["1.2e3"]
+
+
+def test_docx_raised_position_is_a_superscript(tmp_path: Path) -> None:
+    body = '<w:p><w:r><w:t>1.2×10</w:t></w:r><w:r><w:rPr><w:position w:val="6"/></w:rPr><w:t>5</w:t></w:r></w:p>'
+    assert [f"{n.mantissa}e{n.exponent}" for n in cn.read_numbers(_docx(tmp_path, body))] == ["1.2e5"]
+
+
+def test_times_ten_glued_to_digits_is_flagged() -> None:
+    (n,) = cn.extract_numbers("k=1.2×103 s", location="L1")
+    assert n.unreadable and cn.classify(n, _facts("1.2")).status == "exp_unread"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["E = $-$0.52 eV", "E = &minus;0.52 eV", "E = &#8722;0.52 eV", "\\textminus 0.52", "$-\\,0.52$", "E = − 0.52 eV", "(− 0.52)"],
+)
+def test_more_minus_spellings(text: str) -> None:
+    assert _values(text) == ["-0.52e0"]
+
+
+def test_subtraction_with_spaces_is_not_a_minus() -> None:
+    assert _values("1.2 − 0.5 = 0.7") == ["1.2e0", "0.5e0", "0.7e0"]
+
+
+def test_docx_symbol_font_minus(tmp_path: Path) -> None:
+    body = '<w:p><w:r><w:t>E = </w:t><w:sym w:font="Symbol" w:char="F02D"/><w:t>0.52 eV</w:t></w:r></w:p>'
+    assert [str(n.mantissa) for n in cn.read_numbers(_docx(tmp_path, body))] == ["-0.52"]
+
+
+def test_docx_equation_fraction_keeps_numerator_and_denominator_apart(tmp_path: Path) -> None:
+    body = "<w:p><m:oMath><m:f><m:num><m:r><m:t>0.5</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath></w:p>"
+    assert [str(n.mantissa) for n in cn.read_numbers(_docx(tmp_path, body))] == ["0.5"]
+
+
+@pytest.mark.parametrize("text,expected", [("rate 1–3 × 10⁻³", ["1e-3", "3e-3"]), ("0.5–1.5 × 10⁻³", ["0.5e-3", "1.5e-3"])])
+def test_a_range_shares_the_exponent_of_its_right_end(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [("0.1234-5-6", ["0.1234e0"]), ("(see [a](0.5/0.3))", ["0.5e0", "0.3e0"])])
+def test_noise_patterns_do_not_eat_decimals(text: str, expected: list[str]) -> None:
+    assert _values(text)[: len(expected)] == expected
+
+
+def test_skipped_list_is_shown_when_nothing_was_read(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    draft = tmp_path / "draft.md"
+    facts = tmp_path / "facts.md"
+    draft.write_text("Fig. 3.2 と v2.0.1\n", encoding="utf-8")
+    facts.write_text("31.44\n", encoding="utf-8")
+    assert cn.main([str(draft), "--facts", str(facts)]) == 2
+    err = capsys.readouterr().err
+    assert "読まなかった小数" in err and "3.2" in err
+
+
+def test_large_fact_lists_are_fast() -> None:
+    import time
+
+    facts = [n for i in range(30000) for n in cn.extract_numbers(f"{i}.{i % 97:02d}", "F", include_integers=True)]
+    draft = [n for i in range(3000) for n in cn.extract_numbers(f"{i * 7}.{i % 89:02d}", "L1")]
+    t0 = time.perf_counter()
+    index = cn.FactIndex(facts)
+    statuses = [cn.classify(n, index).status for n in draft]
+    assert time.perf_counter() - t0 < 5.0
+    assert len(statuses) == 3000
+
+
+def test_word_charts_and_smartart_are_pointed_out(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "d.docx"
+    _write_zip(path, {
+        "word/document.xml": f"<w:document {ALL_NS}><w:body><w:p><w:r><w:t>31.44</w:t></w:r></w:p></w:body></w:document>",
+        "word/charts/chart1.xml": "<c:chartSpace/>", "word/diagrams/data1.xml": "<dgm:dataModel/>",
+    })
+    facts = tmp_path / "facts.md"
+    facts.write_text("31.44\n", encoding="utf-8")
+    assert cn.main([str(path), "--facts", str(facts)]) == 0
+    assert "グラフ・SmartArt・埋め込み" in capsys.readouterr().out
+
+
+def test_alternate_content_fallback_is_not_read_twice(tmp_path: Path) -> None:
+    body = (
+        "<w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"wps\"><w:drawing><w:txbxContent><w:p><w:r><w:t>yield 0.85</w:t>"
+        "</w:r></w:p></w:txbxContent></w:drawing></mc:Choice><mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:t>yield 0.85</w:t>"
+        "</w:r></w:p></w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>"
+    )
+    assert [str(n.mantissa) for n in cn.read_numbers(_docx(tmp_path, body))] == ["0.85"]
+
+
+def test_a_monstrous_exponent_is_unreadable_not_an_error() -> None:
+    (n,) = cn.extract_numbers("1.5e" + "9" * 5000, location="L1")
+    assert n.unreadable
+
+
+def test_markdown_bullets_are_not_minus_signs(tmp_path: Path) -> None:
+    p = tmp_path / "facts.md"
+    p.write_text("- 150.8 °C までの最大\n* 0.5 と + 0.25\n- −0.3 は負\n", encoding="utf-8")
+    assert [str(n.mantissa) for n in cn.read_numbers(p)] == ["150.8", "0.5", "0.25", "-0.3"]
