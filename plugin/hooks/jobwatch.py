@@ -13,7 +13,8 @@ raw では、裏で走らせる計算と HPC のジョブには必ず見張り�
   ensure-watcher  見張りが動いていなければ起動する（tmux があれば tmux、無ければ切り離して）。
                   Codex の sandbox の中では起動しない（そこでは tmux・ssh・codex queue が使えない）。
                   sandbox の外で動く hook が、ターンの終わり・次の発言のときに起動する
-  judge KEY  ログの完走の印・異常の印・できるはずのファイルで判定する（終了コードでは決めない）
+  judge KEY  ログの完走の印・異常の印・できるはずのファイルで判定する（終了コードでは決めない）。
+             手元に無いログ・ファイルは --host の側で確かめる（ログは印のある行だけを grep で取る）
   status     登録したジョブの一覧
   pending    hook 向け: 終わったが判定していないジョブ・見張りの無いジョブ
                [--start-watcher] 走っているジョブに見張りが無ければ、先に見張りを起動する
@@ -27,6 +28,7 @@ import argparse
 import contextlib
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -38,8 +40,8 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
+from pathlib import Path, PurePosixPath
+from typing import IO, Callable, Iterator
 
 KINDS = ("local", "pbs", "slurm")
 TOOL_MARKERS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -57,7 +59,11 @@ HEARTBEAT = "_watcher.json"
 DEFAULT_INTERVAL = 120.0  # 秒
 STALE_AFTER = 600.0  # 見張りの心拍がこれより古ければ止まっているとみなす（秒）
 SSH_TIMEOUT = 20  # 秒
-PBS_RUNNING_STATES = frozenset("QRHEWTSBM")
+PBS_DONE_STATES = frozenset("FCX")  # 終わった（PBS Pro の F・アレイの子の X、Torque の C）。他の状態（U・S・H 等）はまだ終わっていない
+REMOTE_TIMEOUT = 60  # HPC のログを読むときの待ち時間（秒）
+LOCK_UNSUPPORTED = frozenset(
+    getattr(errno, name) for name in ("ENOLCK", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EINVAL") if hasattr(errno, name)
+)  # ファイルの印に対応しない（このときだけ印なしで書く）
 # Codex が sandbox の中のコマンドに付ける環境変数。中では tmux のソケットを作れず（つなげず）、ssh も
 # ~/.codex への書き込み（codex queue）もできない（2026-11-11 Codex 0.167 の実機）。承認済みの hook は外で動く
 SANDBOX_ENV = ("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
@@ -99,6 +105,7 @@ class Job:
 class Verdict:
     status: str  # 完走 / 完走していない / 異常終了 / 判定できない
     evidence: tuple[str, ...]
+    from_copy: bool = False  # HPC のジョブを手元に取り寄せたコピーで判定した（記録にもそう残す）
 
 
 def _now() -> str:
@@ -132,14 +139,69 @@ def _save(project: Path, job: Job) -> None:
     _write_json(_watch_dir(project) / f"{job.key}.json", dataclasses.asdict(job))
 
 
+def _lock_handle(handle: IO[bytes]) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # 1 秒おきに 10 回試して取れなければ OSError
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_handle(handle: IO[bytes]) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+_UNLOCKED_REPORTED: set[tuple[str, str]] = set()  # このプロセスで「印なし」を知らせたジョブ
+
+
+@contextlib.contextmanager
+def _job_lock(project: Path, key: str) -> Iterator[None]:
+    """ジョブの記録の読み直しから書き込みまでを、他の書き手（見張り・wait・judge）と重ならないようにする。
+    印に対応しないファイルシステム（ネットワーク・同期フォルダ）では、見張りのログに残して印なしで書く
+    （記録できなくなるより、まれな重なりの方がまし）。それ以外の失敗（Windows の待ち切れ等）は上げる。"""
+    path = _watch_dir(project) / f"{key}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+b") as handle:
+        try:
+            _lock_handle(handle)
+            locked = True
+        except OSError as exc:
+            if exc.errno not in LOCK_UNSUPPORTED:
+                raise
+            if (str(project), key) not in _UNLOCKED_REPORTED:  # 書くたびに見張りのログを増やさない
+                _UNLOCKED_REPORTED.add((str(project), key))
+                _log_line(project, f"記録の印に対応しないファイルシステム（{exc}）。印なしで書く: {key}")
+            locked = False
+        try:
+            yield
+        finally:
+            if locked:
+                with contextlib.suppress(OSError):  # 閉じれば外れる。本体の結果を覆わない
+                    _unlock_handle(handle)
+
+
 def _update(project: Path, key: str, expect_state: str, **changes: object) -> Job | None:
-    """保存の直前に読み直し、状態がまだ expect_state のときだけ書き換える（古い読み込みで上書きしない）。"""
-    job = load_job(project, key)
-    if job.state != expect_state:
-        return None
-    new = dataclasses.replace(job, **changes)
-    _save(project, new)
-    return new
+    """読み直して、状態がまだ expect_state のときだけ書き換える。読み直しから書き込みまでは他の書き手を待たせる
+    （古い読み込みで上書きしない・同じ「終わった」を 2 回知らせない）。"""
+    with _job_lock(project, key):
+        job = load_job(project, key)
+        if job.state != expect_state:
+            return None
+        new = dataclasses.replace(job, **changes)
+        _save(project, new)
+        return new
 
 
 def _from_dict(data: dict) -> Job:
@@ -181,8 +243,10 @@ def _markers(tool: str | None, done: list[str] | None, fail: list[str] | None) -
     key = (tool or "").strip().lower()
     key = TOOL_ALIASES.get(key, key) or None
     default_done, default_fail = TOOL_MARKERS.get(key or "", ((), ()))
-    done_markers = tuple(done) if done else default_done
-    fail_markers = tuple(fail) if fail else default_fail
+    if any("\n" in m or "\r" in m for m in (*(done or ()), *(fail or ()))):
+        raise ValueError("完走の印・異常の印に改行は入れられません（ログは 1 行ずつ見る）")
+    done_markers = tuple(m for m in done or () if m.strip()) or default_done  # 空の印は全行に当たるので捨てる
+    fail_markers = tuple(m for m in fail or () if m.strip()) or default_fail
     if not done_markers:
         raise ValueError(f"完走の印が分かりません（{tool}）。--done でログに出る完走の印を指定してください")
     return key, done_markers, fail_markers
@@ -227,12 +291,13 @@ def _create(project: Path, template: Job) -> Job:
 
 
 def _run(cmd: list[str], host: str | None, timeout: float = SSH_TIMEOUT) -> subprocess.CompletedProcess | None:
-    """コマンドを走らせる（host があれば ssh 越し）。時間切れなら子プロセスごと止めて None。"""
+    """コマンドを走らせる（host があれば ssh 越し）。時間切れなら子プロセスごと止めて None。
+    出力は UTF-8 で読み、改行は変えない（\r を改行にしない。grep -n の行の数え方と合わせる）。"""
     if host:
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT // 2}", host, shlex.join(cmd)]
     try:
         proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=os.name != "nt",
         )
     except OSError:
@@ -245,7 +310,7 @@ def _run(cmd: list[str], host: str | None, timeout: float = SSH_TIMEOUT) -> subp
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.communicate(timeout=2)
         return None
-    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
 
 
 def _process_start(pid_text: str) -> str | None:
@@ -276,8 +341,12 @@ def _local_check(job: Job) -> tuple[bool | None, str]:
     if not job.id.isdigit():
         return None, "不明: PID ではない"
     alive = _pid_alive(int(job.id))
-    if alive and job.pid_started and _process_start(job.id) != job.pid_started:
-        return False, "終了（同じ PID の別のプロセスが走っている）"
+    if alive and job.pid_started:
+        started = _process_start(job.id)
+        if started is None:  # ps の時間切れ等。別のプロセスとは決めつけない
+            return None, "不明: プロセスの開始時刻を確かめられない（ps）"
+        if started != job.pid_started:
+            return False, "終了（同じ PID の別のプロセスが走っている）"
     return alive, {True: "走行中", False: "終了", None: "不明"}[alive]
 
 
@@ -304,7 +373,7 @@ def _pbs_check(job: Job) -> tuple[bool | None, str]:
     if res.returncode != 0:
         return None, f"不明: qstat の終了コード {res.returncode}"
     m = re.search(r"job_state\s*=\s*([A-Z])", text)
-    running = (m.group(1) in PBS_RUNNING_STATES and m.group(1) not in "FC") if m else True
+    running = m.group(1) not in PBS_DONE_STATES if m else True
     return running, "走行中" if running else "終了"
 
 
@@ -331,24 +400,75 @@ def is_running(job: Job) -> bool | None:
     return check(job)[0]
 
 
-REMOTE_LOG_BYTES = 5_000_000  # HPC のログは末尾のこれだけを読む
+Row = tuple[int, str]  # （行の番号, 行）
 
 
-def _read_log(project: Path, job: Job) -> str | None:
-    """ログの中身。手元に無く host があれば ssh で末尾を読む。読めなければ None。"""
+def _numbered(text: str) -> list[Row]:
+    """grep -n の出力（「番号:行」）を読む。grep と同じく \n だけで行を分ける（\r で上書きする進み具合の行を割らない）。"""
+    rows = []
+    for line in text.split("\n"):
+        num, sep, rest = line.partition(":")
+        if sep and num.isdigit():
+            rows.append((int(num), rest))
+    return rows
+
+
+def _read_rows(path: Path, markers: tuple[str, ...]) -> list[Row]:
+    """手元のログの、印のある行だけを 1 行ずつ読む（大きなログを全部は持たない）。
+    行は \n だけで分ける（\r で上書きする進み具合の行を割らない。grep -n と同じ数え方）。"""
+    rows = []
+    with open(path, encoding="utf-8", errors="replace", newline="\n") as f:
+        for i, line in enumerate(f, 1):
+            if any(m in line for m in markers):
+                rows.append((i, line.rstrip("\n")))
+    return rows
+
+
+def _is_absolute(path_text: str) -> bool:
+    return PurePosixPath(path_text).is_absolute() or Path(path_text).is_absolute()
+
+
+@dataclass(frozen=True)
+class LogRead:
+    rows: list[Row] | None  # 読めなければ None
+    on_host: bool  # HPC の側で読んだ（できるはずのファイルも HPC の側で確かめる）
+    notes: tuple[str, ...] = ()
+    from_copy: bool = False  # HPC のジョブを手元のコピーで読んだ
+
+
+def _host_failure(job: Job, res: subprocess.CompletedProcess | None) -> str:
+    if res is None or res.returncode == 255:
+        return f"{job.host} に届かない"
+    first = (res.stderr.strip().splitlines() or [""])[0][:200]
+    return f"HPC の側でログを読めない（{first}）" if first else "HPC の側でログを読めない"
+
+
+def _read_log(project: Path, job: Job) -> LogRead:
+    """ログを読む。HPC のジョブは HPC の側を正とし、印のある行だけを grep で取る（長いログでも全部数える・
+    運ばない）。HPC に届かない・HPC の側で読めないときだけ、手元に取り寄せたコピー（プロジェクトからの相対パスで
+    登録したもの）を使い、そう添える。"""
+    markers = (*job.fail, *job.done)
     local = project / job.log
+    if not job.host:
+        return LogRead(_read_rows(local, markers) if local.is_file() else None, on_host=False)
+    patterns = [arg for marker in markers for arg in ("-e", marker)]
+    # -a: 制御文字の混ざったログを「バイナリ」として行を出さずに済ませない
+    res = _run(["grep", "-a", "-n", "-F", *patterns, "--", job.log], job.host, timeout=REMOTE_TIMEOUT)
+    if res is not None and res.returncode in (0, 1):  # 1 は「印のある行が無い」
+        return LogRead(_numbered(res.stdout), on_host=True)
+    reason = _host_failure(job, res)
+    if _is_absolute(job.log):  # 手元の同じパスは別のファイル
+        return LogRead(None, on_host=False, notes=(reason, "HPC の側の絶対パスなので、手元のコピーは探さない"
+                                                           "（取り寄せたらプロジェクトからの相対パスで登録する）"))
     if local.is_file():
-        return local.read_text(encoding="utf-8", errors="replace")
-    if job.host:
-        res = _run(["tail", "-c", str(REMOTE_LOG_BYTES), job.log], job.host, timeout=60)
-        if res is not None and res.returncode == 0:
-            return res.stdout
-    return None
+        note = f"{reason}ので、手元のコピーで判定した: {job.log}"
+        return LogRead(_read_rows(local, markers), on_host=False, notes=(note,), from_copy=True)
+    return LogRead(None, on_host=False, notes=(reason,))
 
 
-def _scan_log(text: str, job: Job) -> tuple[list[str], list[str]]:
+def _scan_log(rows: list[Row], job: Job) -> tuple[list[str], list[str]]:
     done_lines, fail_lines = [], []
-    for i, line in enumerate(text.splitlines(), 1):
+    for i, line in rows:
         if any(m in line for m in job.fail):
             fail_lines.append(f"L{i}: {line.strip()}")
         elif any(m in line for m in job.done):
@@ -356,31 +476,66 @@ def _scan_log(text: str, job: Job) -> tuple[list[str], list[str]]:
     return done_lines, fail_lines
 
 
+def _is_nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _missing_outputs(project: Path, job: Job, on_host: bool) -> list[str] | None:
+    """できていない（無いか空の）出力。ログを HPC の側で読んだなら HPC の側で、手元で読んだなら手元で確かめる
+    （同じ回のものどうしで判定する）。確かめられなければ None。"""
+    if not on_host or not job.outputs:
+        if job.host and any(_is_absolute(o) for o in job.outputs):  # 手元のコピーで判定中。HPC の絶対パスはここに無い
+            return None
+        return [o for o in job.outputs if not _is_nonempty(project / o)]
+    script = 'for f in "$@"; do if test -s "$f"; then echo y; else echo n; fi; done'  # 1 ファイル 1 行、順番どおり
+    res = _run(["sh", "-c", script, "sh", *job.outputs], job.host)
+    if res is None or res.returncode != 0:
+        return None
+    flags = [line.strip() for line in res.stdout.splitlines() if line.strip() in ("y", "n")]
+    if len(flags) != len(job.outputs):  # ログインの挨拶などが混ざって読めない
+        return None
+    return [o for o, flag in zip(job.outputs, flags) if flag == "n"]
+
+
+def _sandbox_hint(job: Job) -> tuple[str, ...]:
+    if job.host and in_sandbox():
+        return ("Codex の sandbox の中では ssh できない。sandbox の外で実行する許可を求めて judge をやり直す",)
+    return ()
+
+
+def _verdict(project: Path, job: Job) -> Verdict:
+    read = _read_log(project, job)
+    if read.rows is None:
+        return Verdict("判定できない", (f"ログが見つかりません: {job.log}", *read.notes, *_sandbox_hint(job)))
+    done_lines, fail_lines = _scan_log(read.rows, job)
+    if fail_lines:
+        return Verdict("異常終了", tuple(fail_lines[:5]) + tuple(done_lines[:3]) + read.notes, read.from_copy)
+    missing = _missing_outputs(project, job, read.on_host)
+    if missing is None:
+        why = f"{job.host} に ssh が通らない" if read.on_host else "HPC の側の絶対パスで、HPC に届かない"
+        notes = (f"できるはずのファイルを確かめられない（{why}）", *_sandbox_hint(job))
+        return Verdict("判定できない", notes + tuple(done_lines[:3]) + read.notes)
+    expected = job.expect_count or 1
+    if len(done_lines) < expected or missing:
+        notes = [f"完走の印 {len(done_lines)} / {expected} 個（{' / '.join(job.done)}）"]
+        notes += [f"できていないファイル: {o}" for o in missing]
+        return Verdict("完走していない", tuple(notes + done_lines[:3]) + read.notes, read.from_copy)
+    return Verdict("完走", tuple(done_lines[:expected + 2]) + read.notes, read.from_copy)
+
+
 def judge(project: Path, key: str) -> Verdict:
     """ログの印とできるはずのファイルで判定する（終了コード・ジョブ管理の表示では決めない）。判定は記録に残す。"""
     job = load_job(project, key)
-    text = _read_log(project, job)
-    if text is None:
-        evidence = (f"ログが見つかりません: {job.log}",)
-        if job.host and in_sandbox():
-            evidence += ("Codex の sandbox の中では ssh できない。sandbox の外で実行する許可を求めて judge をやり直す",)
-        verdict = Verdict("判定できない", evidence)
-    else:
-        done_lines, fail_lines = _scan_log(text, job)
-        expected = job.expect_count or 1
-        missing = [o for o in job.outputs if not (project / o).is_file() or (project / o).stat().st_size == 0]
-        if fail_lines:
-            verdict = Verdict("異常終了", tuple(fail_lines[:5]) + tuple(done_lines[:3]))
-        elif len(done_lines) < expected or missing:
-            notes = [f"完走の印 {len(done_lines)} / {expected} 個（{' / '.join(job.done)}）"]
-            notes += [f"できていないファイル: {o}" for o in missing]
-            verdict = Verdict("完走していない", tuple(notes + done_lines[:3]))
-        else:
-            verdict = Verdict("完走", tuple(done_lines[:expected + 2]))
+    verdict = _verdict(project, job)
     if job.state == "running":
         return Verdict(verdict.status, verdict.evidence + ("まだ走っている（見張りが終わりを確かめていない）ので、判定は記録しない",))
-    if verdict.status != "判定できない":
-        _save(project, dataclasses.replace(job, state="judged", verdict=verdict.status))
+    if verdict.status == "判定できない":
+        return verdict
+    recorded = f"{verdict.status}（手元のコピーで判定）" if verdict.from_copy else verdict.status
+    if _update(project, key, job.state, state="judged", verdict=recorded) is None:
+        now = load_job(project, key)
+        note = f"判定は記録しなかった（判定の間に記録が変わった: {now.state}・{now.verdict or '判定なし'}）"
+        return Verdict(verdict.status, verdict.evidence + (note,))
     return verdict
 
 
@@ -691,11 +846,11 @@ def _parser() -> argparse.ArgumentParser:
     reg.add_argument("--id", required=True, help="ローカルは PID、HPC はジョブ ID")
     reg.add_argument("--host", help="HPC の ssh の接続先（無ければこの計算機で qstat / squeue）")
     reg.add_argument("--tool", help="gaussian / orca / cp2k / gromacs / quantum-espresso / vasp / lammps")
-    reg.add_argument("--log", required=True, help="ログのパス（プロジェクトからの相対）")
+    reg.add_argument("--log", required=True, help="ログのパス（プロジェクトからの相対。--host のジョブは HPC の側の絶対パスかホームからの相対。~ は使えない）")
     reg.add_argument("--done", action="append", help="完走の印（ログに出る文字列。複数可）")
     reg.add_argument("--fail", action="append", help="異常の印（複数可）")
     reg.add_argument("--expect-count", type=int, help="完走の印が出る数（Gaussian の opt+freq なら 2）")
-    reg.add_argument("--output", action="append", help="できるはずのファイル（複数可）")
+    reg.add_argument("--output", action="append", help="できるはずのファイル（複数可。--host のジョブは HPC の側で確かめる。~ は使えない）")
     reg.add_argument("--expect-minutes", type=float, help="予想の所要時間（分）")
     for name in ("wait", "judge"):
         p = sub.add_parser(name)
