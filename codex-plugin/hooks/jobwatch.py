@@ -10,10 +10,13 @@ raw では、裏で走らせる計算と HPC のジョブには必ず見張り�
                [--output できるはずのファイル ...] [--expect-minutes 予想の分]
   wait KEY   そのジョブが終わるまで待つ（Claude Code はこれを裏で走らせ、終わったら再開する）
   watch      セッションを閉じても続く見張り（走っているジョブが無くなるまで。tmux の中で動かす）
-  ensure-watcher  見張りが動いていなければ起動する（tmux があれば tmux、無ければ切り離して）
+  ensure-watcher  見張りが動いていなければ起動する（tmux があれば tmux、無ければ切り離して）。
+                  Codex の sandbox の中では起動しない（そこでは tmux・ssh・codex queue が使えない）。
+                  sandbox の外で動く hook が、ターンの終わり・次の発言のときに起動する
   judge KEY  ログの完走の印・異常の印・できるはずのファイルで判定する（終了コードでは決めない）
   status     登録したジョブの一覧
   pending    hook 向け: 終わったが判定していないジョブ・見張りの無いジョブ
+               [--start-watcher] 走っているジョブに見張りが無ければ、先に見張りを起動する
 
 ジョブが終わると、OS の通知を出し、Codex で登録したジョブなら `codex queue` でそのセッションに伝える。
 ssh が通らないとき（VPN・二段階認証）は「不明」として走っている扱いのまま残す（終わったとは言わない）。
@@ -55,6 +58,15 @@ DEFAULT_INTERVAL = 120.0  # 秒
 STALE_AFTER = 600.0  # 見張りの心拍がこれより古ければ止まっているとみなす（秒）
 SSH_TIMEOUT = 20  # 秒
 PBS_RUNNING_STATES = frozenset("QRHEWTSBM")
+# Codex が sandbox の中のコマンドに付ける環境変数。中では tmux のソケットを作れず（つなげず）、ssh も
+# ~/.codex への書き込み（codex queue）もできない（2026-11-11 Codex 0.167 の実機）。承認済みの hook は外で動く
+SANDBOX_ENV = ("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
+SANDBOX_OFF = frozenset({"", "0", "false", "no", "off"})
+LOCK = "_watcher.lock"  # 見張りは 1 プロジェクトに 1 本（同時に 2 本起動されたら後の方はすぐ終わる）
+LOCK_FRESH = 60.0  # 中身がまだ書かれていない印は、これより新しければ使用中とみなす（秒）
+START_FAILED = "_start_failed.json"
+HOOK_START_WAIT = 3.0  # hook から起動したとき心拍を待つ（秒）
+START_RETRY_AFTER = 600.0  # hook からの起動に失敗したら、これだけあけてから起動し直す（発言のたびに待たせない）
 
 Notify = Callable[[str], None]
 Launch = Callable[[list[str]], None]
@@ -349,7 +361,10 @@ def judge(project: Path, key: str) -> Verdict:
     job = load_job(project, key)
     text = _read_log(project, job)
     if text is None:
-        verdict = Verdict("判定できない", (f"ログが見つかりません: {job.log}",))
+        evidence = (f"ログが見つかりません: {job.log}",)
+        if job.host and in_sandbox():
+            evidence += ("Codex の sandbox の中では ssh できない。sandbox の外で実行する許可を求めて judge をやり直す",)
+        verdict = Verdict("判定できない", evidence)
     else:
         done_lines, fail_lines = _scan_log(text, job)
         expected = job.expect_count or 1
@@ -449,7 +464,10 @@ def _beat(project: Path, interval: float) -> None:
 
 def watch(project: Path, interval: float = DEFAULT_INTERVAL, notify: Notify | None = os_notify,
           max_loops: int | None = None) -> int:
-    """走っているジョブが無くなるまで見張る。回った回数を返す。終わるときは心拍を消す（次の見張りが起動できるように）。"""
+    """走っているジョブが無くなるまで見張る。回った回数を返す。終わるときは心拍を消す（次の見張りが起動できるように）。
+    別の見張りが動いていれば（印を持っていれば）何もせずに 0 を返す（二重の通知・心拍の消し合いを防ぐ）。"""
+    if not _claim(project):
+        return 0
     loops = 0
     try:
         while max_loops is None or loops < max_loops:
@@ -463,9 +481,39 @@ def watch(project: Path, interval: float = DEFAULT_INTERVAL, notify: Notify | No
                 break
             time.sleep(interval)
     finally:
-        with contextlib.suppress(OSError):
-            (_watch_dir(project) / HEARTBEAT).unlink()
+        for name in (HEARTBEAT, LOCK):
+            with contextlib.suppress(OSError):
+                (_watch_dir(project) / name).unlink()
     return loops
+
+
+def _claim(project: Path) -> bool:
+    """見張りの印を取る。生きている別の見張りが持っていれば False。死んだ見張りの印は引き継ぐ。"""
+    path = _watch_dir(project) / LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if _lock_held(path):
+                return False
+            with contextlib.suppress(OSError):
+                path.unlink()
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(str(os.getpid()))
+        return True
+    return False
+
+
+def _lock_held(path: Path) -> bool:
+    try:
+        holder = int(path.read_text(encoding="utf-8").strip())
+    except ValueError:  # 作られた直後でまだ pid が無い
+        return time.time() - path.stat().st_mtime < LOCK_FRESH
+    except OSError:
+        return False
+    return _pid_alive(holder) is not False
 
 
 def wait(project: Path, key: str, interval: float = DEFAULT_INTERVAL, give_up_after: float = 3600.0) -> str:
@@ -531,24 +579,87 @@ def _default_launch(cmd: list[str]) -> None:
     log = Path(cmd[cmd.index("--project") + 1]) / WATCH_DIR / "_watcher.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as out:
-        flags = {"creationflags": 0x00000008} if os.name == "nt" else {"start_new_session": True}
+        # Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP（コンソールの Ctrl-C・閉じる操作を受けない）
+        flags = {"creationflags": 0x00000008 | 0x00000200} if os.name == "nt" else {"start_new_session": True}
         subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, **flags)  # noqa: S603
 
 
-def ensure_watcher(project: Path, launch: Launch | None = None) -> str:
-    """見張りが動いていなければ起動する。"already" / "tmux" / "detached" を返す。"""
+def in_sandbox() -> bool:
+    """Codex の sandbox の中か（SANDBOX_ENV を参照。「0」「false」などは sandbox でない）。"""
+    return any(os.environ.get(name, "").strip().lower() not in SANDBOX_OFF for name in SANDBOX_ENV)
+
+
+def _log_line(project: Path, text: str) -> None:
+    with contextlib.suppress(OSError):
+        _watch_dir(project).mkdir(parents=True, exist_ok=True)
+        with (_watch_dir(project) / "_watcher.log").open("a", encoding="utf-8") as out:
+            out.write(f"{_now()} {text}\n")
+
+
+def ensure_watcher(project: Path, launch: Launch | None = None, respect_sandbox: bool = True) -> str:
+    """見張りが動いていなければ起動する。"already" / "sandboxed" / "tmux" / "detached" を返す。
+
+    Codex の sandbox の中では起動しない（"sandboxed"）。そこで起動した見張りは HPC にも Codex の
+    セッションにも届かないため、sandbox の外で動く hook（start_watcher_if_needed）に任せる。
+    respect_sandbox=False は sandbox の外だと分かっているとき（hook・--force）。
+    tmux で起動できなければ、切り離したプロセスで起動する（二重になっても、後の見張りは印が取れずに終わる）。
+    """
     _check_project(project)
     if _watcher_alive(project):
         return "already"
+    if respect_sandbox and in_sandbox():
+        return "sandboxed"
     launch = launch or _default_launch
     cmd = [sys.executable, _script(), "watch", "--project", str(project)]
     if shutil.which("tmux"):
         session = "raw-watch-" + hashlib.sha1(str(project).encode("utf-8")).hexdigest()[:8]
         log = shlex.quote(str(_watch_dir(project) / "_watcher.log"))
-        launch(["tmux", "new-session", "-d", "-s", session, f"{shlex.join(cmd)} >> {log} 2>&1"])
-        return "tmux"
+        try:
+            launch(["tmux", "new-session", "-d", "-s", session, f"{shlex.join(cmd)} >> {log} 2>&1"])
+            return "tmux"
+        except (OSError, subprocess.CalledProcessError) as exc:
+            print(f"tmux で起動できない（{exc}）。切り離して起動する", file=sys.stderr)
+            _log_line(project, f"tmux で起動できない（{exc}）。切り離して起動する")
     launch(cmd)
     return "detached"
+
+
+def start_watcher_if_needed(project: Path, launch: Launch | None = None) -> str | None:
+    """hook 向け: 走っているジョブがあるのに見張りが無ければ起動し、起動の仕方を返す。何もしなければ None。
+    hook は sandbox の外で動くので、sandbox の環境変数は見ない（引き継がれていても起動する）。"""
+    if not any(job.state == "running" for job in load_jobs(project)):
+        return None
+    how = ensure_watcher(project, launch, respect_sandbox=False)
+    return None if how == "already" else how
+
+
+def _failed_recently(project: Path) -> bool:
+    try:
+        at = float(json.loads((_watch_dir(project) / START_FAILED).read_text(encoding="utf-8"))["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return time.time() - at < START_RETRY_AFTER
+
+
+def _start_from_hook(project: Path) -> str:
+    """pending --start-watcher: 見張りを起動する。起動できなかったときだけ、その旨の 1 行を返す。
+    失敗したら START_RETRY_AFTER 秒は起動し直さない（壊れた起動で発言のたびに待たせない）。"""
+    if _failed_recently(project):
+        return ""
+    log = _watch_dir(project) / "_watcher.log"
+    try:
+        how = start_watcher_if_needed(project)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        reason = str(exc)
+    else:
+        if how is None or wait_for_heartbeat(project, HOOK_START_WAIT):
+            with contextlib.suppress(OSError):
+                (_watch_dir(project) / START_FAILED).unlink()
+            return ""
+        reason = f"起動（{how}）から {HOOK_START_WAIT:.0f} 秒たっても心拍が無い"
+    _write_json(_watch_dir(project) / START_FAILED, {"at": time.time(), "reason": reason})
+    return (f"  （hook から見張りを起動できなかった: {reason}。ログ: {log}。"
+            f"{START_RETRY_AFTER / 60:.0f} 分は hook から起動し直さない）")
 
 
 def wait_for_heartbeat(project: Path, timeout: float = 5.0) -> bool:
@@ -594,6 +705,10 @@ def _parser() -> argparse.ArgumentParser:
         sub.choices[name].add_argument("--interval", type=float, default=DEFAULT_INTERVAL)
     for name in ("status", "pending", "ensure-watcher"):
         sub.add_parser(name)
+    sub.choices["ensure-watcher"].add_argument(
+        "--force", action="store_true", help="sandbox の外で実行していると分かっているとき（sandbox の環境変数を見ない）")
+    sub.choices["pending"].add_argument(
+        "--start-watcher", action="store_true", help="走っているジョブに見張りが無ければ、先に見張りを起動する（hook 向け）")
     for p in sub.choices.values():
         p.add_argument("--project", help="プロジェクトのフォルダ（省略時は今の場所から上へ探す）")
     return parser
@@ -629,6 +744,13 @@ def _cmd_status(project: Path) -> int:
     return 0
 
 
+SANDBOXED_MESSAGE = (
+    "見張り: Codex の sandbox の中なので、ここでは起動しない（sandbox の中では tmux が使えず、"
+    "HPC にも Codex のセッションにも届かない）。このターンの終わりに raw の hook が sandbox の外で起動する"
+    "（hook を信頼していることが前提）。すぐに要るときは、sandbox の外で実行する許可を求めて、--force を付けてもう一度実行する"
+)
+
+
 def _utf8_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -657,7 +779,10 @@ def main(argv: list[str] | None = None) -> int:
             watch(project, a.interval)
             return 0
         if a.command == "ensure-watcher":
-            how = ensure_watcher(project)
+            how = ensure_watcher(project, respect_sandbox=not a.force)
+            if how == "sandboxed":
+                print(SANDBOXED_MESSAGE)
+                return 0
             if how != "already" and not wait_for_heartbeat(project):
                 print(f"見張りを起動しましたが（{how}）、5 秒たっても心拍がありません。status で確かめてください", file=sys.stderr)
                 return 1
@@ -665,14 +790,18 @@ def main(argv: list[str] | None = None) -> int:
                   f"。{DEFAULT_INTERVAL:.0f} 秒おきに確かめる")
             return 0
         if a.command == "pending":
+            note = _start_from_hook(project) if a.start_watcher else ""
             text = pending_text(project)
             if text:
-                print(text)
+                print(text + (f"\n{note}" if note else ""))
             return 0
         return _cmd_status(project)
     except (KeyError, ValueError) as exc:
         print(str(exc).strip("'\""), file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"失敗: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

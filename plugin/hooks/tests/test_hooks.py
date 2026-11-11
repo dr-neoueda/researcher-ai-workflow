@@ -5,6 +5,7 @@ Claude Code と Codex CLI の両方の入力の形（標準入力の JSON）で�
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -19,8 +20,10 @@ REPO = HOOKS.parent.parent
 CODEX_HOOKS = REPO / "codex-plugin" / "hooks"
 
 
-def run_hook(name: str, payload: dict, cwd: Path, project_dir: Path | None = None) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+def run_hook(name: str, payload: dict, cwd: Path, project_dir: Path | None = None,
+             extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "CODEX_SANDBOX"))}
+    env.update(extra_env or {})
     if project_dir is not None:
         env["CLAUDE_PROJECT_DIR"] = str(project_dir)
     return subprocess.run(
@@ -364,3 +367,73 @@ def test_hooks_json_wires_the_job_hooks() -> None:
     data = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))["hooks"]
     assert "jobs-reminder.sh" in json.dumps(data["UserPromptSubmit"])
     assert "jobs-stop-check.sh" in json.dumps(data["Stop"])
+
+
+# ---------- hook が見張りを起動する（Codex の sandbox の中では見張りを起動できないため。2026-11-11）----------
+
+def _live_job_and_fake_tmux(project: Path, tmp_path: Path) -> tuple[subprocess.Popen, dict[str, str]]:
+    """走っているジョブを 1 本登録し、渡されたコマンドを切り離して走らせる偽の tmux を PATH に置く。"""
+    import sys as _sys
+    _sys.path.insert(0, str(HOOKS))
+    import jobwatch as jw
+
+    live = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"])
+    jw.register(project, name="ts2-opt", kind="local", job_id=str(live.pid), tool="gaussian", log="x.log")
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    record = tmp_path / "tmux-args.txt"
+    tmux = bindir / "tmux"
+    pidfile = tmp_path / "fake-tmux.pid"
+    tmux.write_text(f'#!/bin/bash\nprintf "%s\\n" "$@" > "{record}"\nnohup bash -c "$5" >/dev/null 2>&1 &\n'
+                    f'echo $! > "{pidfile}"\nexit 0\n', encoding="utf-8")
+    tmux.chmod(0o755)
+    return live, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+
+
+def _stop_watcher(project: Path, live: subprocess.Popen, tmp_path: Path) -> None:
+    """見張り（心拍の pid）と偽の tmux が切り離したプロセスを止める（テストが途中で落ちても残さない）。"""
+    live.kill()
+    live.wait()
+    pids = []
+    beat = project / "office" / "computation" / "watch" / "_watcher.json"
+    with contextlib.suppress(OSError, ValueError, KeyError):
+        pids.append(int(json.loads(beat.read_text(encoding="utf-8"))["pid"]))
+    with contextlib.suppress(OSError, ValueError):
+        pids.append(int((tmp_path / "fake-tmux.pid").read_text(encoding="utf-8")))
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, 15)
+
+
+def _heartbeat_written(project: Path) -> bool:
+    return (project / "office" / "computation" / "watch" / "_watcher.json").is_file()
+
+
+def test_prompt_submit_starts_the_watcher_for_unwatched_jobs(project: Path, tmp_path: Path) -> None:
+    live, env = _live_job_and_fake_tmux(project, tmp_path)
+    try:
+        res = run_hook("jobs-reminder.sh", {"cwd": str(project), "prompt": "続けて"}, cwd=project, extra_env=env)
+        assert res.returncode == 0 and _heartbeat_written(project)
+        assert "見張りの無いジョブ" not in res.stdout
+        assert (tmp_path / "tmux-args.txt").read_text(encoding="utf-8").startswith("new-session")
+    finally:
+        _stop_watcher(project, live, tmp_path)
+
+
+def test_stop_starts_the_watcher_instead_of_holding(project: Path, tmp_path: Path) -> None:
+    live, env = _live_job_and_fake_tmux(project, tmp_path)
+    try:
+        res = run_hook("jobs-stop-check.sh", {"cwd": str(project)}, cwd=project, extra_env=env)
+        assert res.returncode == 0 and res.stderr == "" and _heartbeat_written(project)
+    finally:
+        _stop_watcher(project, live, tmp_path)
+
+
+def test_session_start_starts_the_watcher_for_unwatched_jobs(project: Path, tmp_path: Path) -> None:
+    live, env = _live_job_and_fake_tmux(project, tmp_path)
+    try:
+        res = run_hook("load-playbooks.sh", {"cwd": str(project)}, cwd=project, extra_env=env)
+        assert res.returncode == 0 and _heartbeat_written(project)
+        assert "見張りの無いジョブ" not in res.stdout
+    finally:
+        _stop_watcher(project, live, tmp_path)

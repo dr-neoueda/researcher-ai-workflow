@@ -95,8 +95,8 @@ python -c "import numpy, pandas, scipy, matplotlib; print('analysis deps OK')"
 過去データを入れて『取り込んで』と言うと Playbook を最適化できます」と次の一歩を添える。
 
 **hook の承認（Codex）**：raw の自動の仕組み（起動時の読み込み・置き場所の見張り・計算ジョブの見張り・学びの催促）は、Codex では
-ユーザーが `/hooks` で信頼（trust）するまで動かない。報告の最後に「まだなら `/hooks` で raw の hook をすべて信頼にしてください。
-プラグインを更新したときも確認が出ます」と添える。hook は Python を使うので、Python が無いと置き場所の見張りは働かない。
+ユーザーが信頼（trust）するまで動かない。報告の最後に「起動したときに『Hooks need review』と出たら『Trust all and continue』を、
+出なかったら `/hooks` と入力して `t` で raw の hook をすべて信頼にしてください。プラグインを更新したときも確認が出ます」と添える。hook は Python を使うので、Python が無いと置き場所の見張りは働かない。
 
 ## 重要な注意事項
 

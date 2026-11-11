@@ -12,7 +12,7 @@ project_dir="$(hook_project)"
 [ -n "$project_dir" ] || exit 0
 py="$(hook_python)"
 [ -n "$py" ] || exit 0
-pending="$("$py" "$HOOK_DIR/jobwatch.py" pending --project "$project_dir" 2>/dev/null)"
+pending="$("$py" "$HOOK_DIR/jobwatch.py" pending --project "$project_dir" --start-watcher 2>/dev/null)"
 [ -n "$pending" ] || exit 0
 
 cat >&2 <<MSG

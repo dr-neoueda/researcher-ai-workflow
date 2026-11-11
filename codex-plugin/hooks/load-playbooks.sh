@@ -64,7 +64,7 @@ if [ -n "$py" ]; then
     echo "（終了コードでは決めない）→ ジョブ記録と Playbook に反映し、同じ応答で次に投入するものを決める。詳しくは office/ の設定ファイルの「計算の見張り」。"
     echo "見張りの道具: $py \"$HOOK_DIR/jobwatch.py\""
     echo ""
-    "$py" "$HOOK_DIR/jobwatch.py" pending --project "$project_dir" 2>/dev/null
+    "$py" "$HOOK_DIR/jobwatch.py" pending --project "$project_dir" --start-watcher 2>/dev/null
     echo ""
 fi
 
