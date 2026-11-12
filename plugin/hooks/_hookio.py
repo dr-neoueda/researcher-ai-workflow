@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
-PATCH_PATH = re.compile(r"^\*\*\* (?:(?:Add|Update) File|Move to): (.+?)\s*$", re.M)  # 削除は違反ではない
+PATCH_HEADER = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 
 
 def load(stream: Any = None) -> dict[str, Any]:
@@ -52,6 +52,21 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(item)
 
 
+def _patch_targets(text: str) -> list[str]:
+    """apply_patch のパッチで書き込んだファイル。削除は違反ではないので数えない。
+    「Update File: 元」の直後の「Move to: 先」は移動なので、元は書き込み先から外して先だけを数える。"""
+    targets: list[str] = []
+    previous = ""
+    for match in PATCH_HEADER.finditer(text):
+        kind, path = match.group(1), match.group(2).strip("\"'")
+        if kind == "Move to" and previous == "Update File" and targets:
+            targets[-1] = path
+        elif kind != "Delete File":
+            targets.append(path)
+        previous = kind
+    return targets
+
+
 def edited_paths(data: dict[str, Any], root: Path) -> list[str]:
     """書き換えたファイルの、プロジェクトからの相対パス（プロジェクトの外は除く）。"""
     tool_input = data.get("tool_input")
@@ -60,25 +75,25 @@ def edited_paths(data: dict[str, Any], root: Path) -> list[str]:
         raw.append(tool_input["file_path"])
     if data.get("tool_name") in (None, "apply_patch"):  # Write の本文に書いたパッチの例は読まない
         for text in _strings(tool_input):
-            raw.extend(m.group(1).strip("\"'") for m in PATCH_PATH.finditer(text))
+            raw.extend(_patch_targets(text))
     base = Path(data["cwd"]) if isinstance(data.get("cwd"), str) else Path.cwd()
     out: list[str] = []
     for item in raw:
         path = Path(item)
-        absolute = (path if path.is_absolute() else base / path).resolve()
         try:
+            absolute = (path if path.is_absolute() else base / path).resolve()
             out.append(absolute.relative_to(root).as_posix())
-        except ValueError:
+        except (ValueError, OSError, RuntimeError):  # プロジェクトの外・NUL を含むパス・リンクの輪（3.12 以前）
             continue
     return out
 
 
 def _utf8_stdio() -> None:
-    """日本語の Windows（cp932）でも、UTF-8 の JSON を読み、UTF-8 で書く。"""
-    for stream in (sys.stdin, sys.stdout):
+    """日本語の Windows（cp932）でも、UTF-8 の JSON を読み、UTF-8 で書く。入力の先頭の BOM は読み飛ばす。"""
+    for stream, encoding in ((sys.stdin, "utf-8-sig"), (sys.stdout, "utf-8")):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
-            reconfigure(encoding="utf-8", errors="replace")
+            reconfigure(encoding=encoding, errors="replace")
 
 
 def main(argv: list[str]) -> int:

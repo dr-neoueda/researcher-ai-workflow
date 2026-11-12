@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,63 @@ def test_codex_patch_that_moves_a_file_into_old_layout(project: Path) -> None:
     payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"input": patch}}
     res = run_hook("output-location-check.sh", payload, cwd=project)
     assert res.returncode == 2 and "work/manuscripts/a.md" in res.stderr
+
+
+def test_codex_patch_that_moves_a_file_out_of_old_layout_is_silent(project: Path) -> None:
+    patch = "*** Begin Patch\n*** Update File: office/research/papers/a.md\n*** Move to: work/papers/a.md\n*** End Patch\n"
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"input": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_only_the_moved_file_in_a_patch_drops_its_old_path(project: Path) -> None:
+    patch = (
+        "*** Begin Patch\n*** Update File: office/research/papers/a.md\n@@\n-x\n+y\n"
+        "*** Update File: office/research/papers/b.md\n*** Move to: work/papers/b.md\n*** End Patch\n"
+    )
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"input": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/a.md" in res.stderr and "b.md" not in res.stderr
+
+
+def test_a_payload_that_starts_with_a_bom_is_read(project: Path) -> None:
+    payload = {"cwd": str(project), "tool_name": "Write", "tool_input": {"file_path": "office/research/papers/a.md"}}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    res = subprocess.run(
+        ["bash", str(HOOKS / "output-location-check.sh")], input="﻿" + json.dumps(payload),
+        capture_output=True, text=True, cwd=project, env=env, timeout=30,
+    )
+    assert res.returncode == 2 and "work/papers/a.md" in res.stderr
+
+
+def test_a_path_with_a_nul_is_skipped_without_a_traceback(project: Path) -> None:
+    patch = "*** Begin Patch\n*** Add File: a\u0000b\n*** Add File: office/research/papers/c.md\n*** End Patch\n"
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"input": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/c.md" in res.stderr and "Traceback" not in res.stderr
+
+
+def test_a_move_line_after_an_added_file_does_not_hide_it(project: Path) -> None:
+    patch = "*** Begin Patch\n*** Add File: office/research/papers/a.md\n+x\n*** Move to: work/papers/z.md\n*** End Patch\n"
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"input": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/a.md" in res.stderr
+
+
+PYTHONS = sorted({sys.executable, *(p for p in ("/usr/bin/python3",) if Path(p).exists())})
+
+
+@pytest.mark.parametrize("python", PYTHONS)
+def test_a_symlink_loop_in_a_path_is_skipped(project: Path, python: str) -> None:
+    (project / "loop").symlink_to("loop")  # Python 3.12 以前の resolve() は RuntimeError を上げる
+    patch = "*** Begin Patch\n*** Add File: loop/x.md\n*** Add File: office/research/papers/c.md\n*** End Patch\n"
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"input": patch}}
+    res = subprocess.run(
+        [python, str(HOOKS / "_hookio.py"), "paths"], input=json.dumps(payload),
+        capture_output=True, text=True, cwd=project, timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "office/research/papers/c.md" in res.stdout.splitlines()  # 3.13 以降はループの先も相対パスで出る
 
 
 def test_writes_to_the_right_place_are_silent(project: Path) -> None:
