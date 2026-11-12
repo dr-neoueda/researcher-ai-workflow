@@ -511,3 +511,12 @@ def test_root_rules_require_a_watch_on_every_job(tmp_path, config, skill, root):
         assert word in section, word
     dept = (tmp_path / "office" / "computation" / root).read_text(encoding="utf-8")
     assert "jobwatch.py register" in dept
+
+
+@pytest.mark.parametrize("skill,root", [(SKILL_DIR, "CLAUDE.md"), (CODEX_SKILL, "AGENTS.md")])
+def test_root_rules_send_research_questions_to_the_library_first(tmp_path, config, skill, root):
+    scaffold.scaffold(config, skill, tmp_path)
+    body = (tmp_path / "office" / root).read_text(encoding="utf-8")
+    section = body.split("### 研究の質問への答え方", 1)[1].split("\n### ", 1)[0]
+    for word in ("raw-ask", "work/papers/md", "URL", "Paper DB 未登録"):
+        assert word in section, word

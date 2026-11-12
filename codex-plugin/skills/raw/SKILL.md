@@ -319,6 +319,7 @@ scaffold 完了後、**`raw-setup` SKILL の Step 2〜4 を per-tool モード�
 
 | 文脈・キーワード | 振り分け先 |
 |---|---|
+| 研究の質問（先行研究・文献値・手法・機構・「〜って何？」）に答える | research（raw-ask。登録済みの論文から、無ければ Web で URL つき） |
 | 論文の検索・文献調査（探す/集める） | research（raw-research） |
 | 論文 PDF の登録・要約・書誌・引用整理 | research（raw-register） |
 | Python スクリプト作成、CLI 化、解析ツール | engineering |
