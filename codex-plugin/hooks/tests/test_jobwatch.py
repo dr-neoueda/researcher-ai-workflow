@@ -1212,3 +1212,48 @@ def test_a_fresh_lock_before_the_first_heartbeat_counts_as_held(project: Path) -
     jw.register(project, name="a", kind="local", job_id=str(_dead_pid()), tool="gaussian", log="x.log")
     _hold_lock(project, os.getpid())                     # 印を取った直後で、まだ心拍を書いていない
     assert jw.watch(project, interval=0.01, notify=None, max_loops=5) == 0
+
+
+# ---------- 確かめの周 2（2026-11-12）----------
+
+def test_a_transient_read_error_does_not_end_a_live_watcher(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows では置き換えの最中のファイルが一瞬読めない（PermissionError）。そのたびに見張りが終わらない。"""
+    live, _job = _live_job(project)
+    real_read = Path.read_text
+    calls = {"n": 0}
+
+    def flaky(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == jw.LOCK:
+            calls["n"] += 1
+            if calls["n"] == 2:                          # 2 回目の確かめで一瞬読めない
+                raise PermissionError(13, "in use")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    monkeypatch.setattr(jw, "watch_once", lambda *_a, **_k: [])  # 印を読むのは回の先頭の確かめだけにする
+    try:
+        loops = jw.watch(project, interval=0.01, notify=None, max_loops=4)
+    finally:
+        live.kill()
+        live.wait()
+    assert loops == 4
+
+
+def test_a_lock_that_disappeared_means_the_watcher_lost_it(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    live, _job = _live_job(project)
+    lock = project / "office" / "computation" / "watch" / "_watcher.lock"
+    monkeypatch.setattr(jw, "watch_once", lambda *_a, **_k: lock.unlink() or [])
+    try:
+        loops = jw.watch(project, interval=0.01, notify=None, max_loops=4)
+    finally:
+        live.kill()
+        live.wait()
+    assert loops == 1
+
+
+def test_a_lock_with_a_non_ascii_digit_is_not_a_pid(project: Path) -> None:
+    lock = project / "office" / "computation" / "watch" / "_watcher.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("²", encoding="utf-8")
+    _old(lock)
+    assert jw._lock_held(project, lock) is False

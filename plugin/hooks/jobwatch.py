@@ -660,10 +660,14 @@ def watch(project: Path, interval: float = DEFAULT_INTERVAL, notify: Notify | No
 
 
 def _owns_lock(project: Path) -> bool:
+    """印が自分のものか。印が消えていれば引き継がれた（False）。一瞬読めないだけ（Windows で置き換えの最中など）
+    なら自分のものとみなして続ける（次の回にまた確かめる）。"""
     try:
         return (_watch_dir(project) / LOCK).read_text(encoding="utf-8").strip() == str(os.getpid())
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
 
 
 def _release(project: Path) -> None:
@@ -704,7 +708,7 @@ def _lock_held(project: Path, path: Path) -> bool:
         text = path.read_text(encoding="utf-8").strip()
     except OSError:  # 読む間に消えた
         return False
-    if not text.isdigit():  # 作られた直後でまだ pid が無い
+    if not (text.isascii() and text.isdigit()):  # 作られた直後でまだ pid が無い（「²」のような数字も pid ではない）
         return age < LOCK_FRESH
     if _pid_alive(int(text)) is False:
         return False
