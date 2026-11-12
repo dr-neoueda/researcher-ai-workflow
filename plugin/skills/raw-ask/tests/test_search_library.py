@@ -258,3 +258,139 @@ def test_snippet_finds_half_width_katakana(tmp_path: Path) -> None:
     _paper(lib, "hw", "Half width", "## 本文\n" + "前置きの文。" * 40 + "ここで ﾎﾟﾘﾏｰ を合成した。\n")
     (hit,) = sl.search(sl.load_library(lib), ["ポリマー"])
     assert "ポリマー" in hit.snippet
+
+
+# ---------- マージ前の確かめのレビュー（2026-11-12 python-reviewer）----------
+
+ZEOLITE = "---\ntitle: Zeolite paper\n---\n# Zeolite paper\n\n## 主要な結果\nsolid state zeolite 結晶構造\n"
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_utf16_files_are_searchable_not_counted_as_garbage(tmp_path: Path, encoding: str) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "u16.md").write_bytes(ZEOLITE.encode(encoding))  # utf-16 は BOM つき、-le・-be は BOM なし
+    _paper(lib, "other", "Other paper", "## 本文\nnothing here\n")
+    hits = sl.search(sl.load_library(lib), ["zeolite"])
+    assert hits and hits[0].paper.path.stem == "u16" and hits[0].paper.title == "Zeolite paper"
+
+
+def test_a_utf8_file_with_one_broken_byte_is_still_searchable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "broken.md").write_bytes(ZEOLITE.encode("utf-8") + b"\xff")
+    hits = sl.search(sl.load_library(lib), ["結晶構造"])
+    assert hits and hits[0].paper.path.stem == "broken"
+    sl.main(["結晶構造", "--library", str(lib)])
+    out = capsys.readouterr().out
+    assert "broken.md" in out and "文字コード" in out          # 推定して読んだことを知らせる
+
+
+def test_a_shift_jis_file_is_reported_as_guessed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "sjis.md").write_bytes("# 分子結晶の研究\n\n## 主要な結果\n分子結晶で反応が進んだ。\n".encode("cp932"))
+    sl.main(["分子結晶", "--library", str(lib)])
+    out = capsys.readouterr().out
+    assert "sjis.md" in out and "文字コード" in out
+
+
+def test_frontmatter_keys_are_case_insensitive(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "b.md").write_text("---\nTitle: Capital Key\nDOI: 10.1/y\nAuthor: [Kim S]\n---\n\n## Results\nok\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.title == "Capital Key" and paper.doi == "10.1/y" and paper.authors == ("Kim S",)
+    assert sl.search([paper], ["Capital"])
+
+
+def test_unindented_list_items_stay_in_the_frontmatter(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "y.md").write_text("---\ntags:\n- a1\n- b2\ntitle: T\ndoi: 10.1/x\nyear: 2021\n---\n# H\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.tags == ("a1", "b2") and paper.title == "T" and paper.doi == "10.1/x" and paper.year == "2021"
+
+
+@pytest.mark.parametrize("style", [">", "|", ">-", "|+"])
+def test_block_scalar_titles_are_read(tmp_path: Path, style: str) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "z.md").write_text(f"---\ntitle: {style}\n  A long title\n  that wraps\nyear: 2019\n---\n# H\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.title == "A long title that wraps" and paper.year == "2019"
+
+
+@pytest.mark.parametrize("query", ["Tanaka", "10.1000/abc", "Acta Testica"])
+def test_authors_doi_and_journal_are_searchable(tmp_path: Path, query: str) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "t.md").write_text(
+        "---\ntitle: Zeolites\nauthors: [Tanaka Hiroshi, Suzuki Ken]\njournal: Acta Testica\ndoi: 10.1000/abc\n---\n"
+        "# Zeolites\n\n## 本文\nzeolite\n", encoding="utf-8")
+    _paper(lib, "other", "Other paper", "## 本文\nnothing here\n")
+    hits = sl.search(sl.load_library(lib), [query])
+    assert hits and hits[0].paper.path.stem == "t"
+
+
+def test_json_is_printed_even_for_an_empty_library(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    assert sl.main(["zeolite", "--library", str(lib), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["papers"] == 0 and data["hits"] == []
+
+
+def test_the_empty_library_message_does_not_repeat_the_count(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    sl.main(["zeolite", "--library", str(lib)])
+    assert capsys.readouterr().out.count("登録済み 0 本") == 1
+
+
+@pytest.mark.parametrize("text,expected", [("άλφα", ["αλφα"]), ("Ώ", ["ω"])])
+def test_accented_greek_is_folded(text: str, expected: list[str]) -> None:
+    assert sl.tokenize(text) == expected
+
+
+def test_skill_requires_both_url_and_label_for_web_claims() -> None:
+    skill = (Path(sl.__file__).resolve().parent.parent / "SKILL.md").read_text(encoding="utf-8")
+    assert "URL か「（Paper DB 未登録）」" not in skill
+    assert "URL と「（Paper DB 未登録）」の両方" in skill
+    assert "（根拠なし・推測）" in skill.split("### Step 5")[1]   # 答えの形にも、出どころの無い文の扱いがある
+
+
+JAPANESE = "# 結晶構造の研究\n\n## 結果\n分子結晶で反応が進んだ。\n"
+
+
+def test_a_japanese_utf16_file_with_a_bom_is_searchable(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "ja16.md").write_bytes(JAPANESE.encode("utf-16"))  # NUL が少なく、BOM でしか分からない
+    hits = sl.search(sl.load_library(lib), ["結晶構造"])
+    assert hits and hits[0].paper.title == "結晶構造の研究"
+
+
+def test_a_japanese_utf16_file_without_a_bom_is_unreadable_not_garbage(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "ja16.md").write_bytes(JAPANESE.encode("utf-16-le"))  # cp932 では NUL まじりの化けた字に読めてしまう
+    papers, unreadable = sl.load_library_report(lib)
+    assert papers == [] and [p.name for p in unreadable] == ["ja16.md"]
+
+
+def test_a_utf16_file_is_listed_for_resaving(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "u16.md").write_bytes(ZEOLITE.encode("utf-16"))
+    sl.main(["zeolite", "--library", str(lib)])
+    out = capsys.readouterr().out
+    assert "文字コードを推定して読んだ 1 本" in out and "u16.md" in out
+
+
+def test_tags_and_keywords_are_merged(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "k.md").write_text("---\ntitle: T\ntags: [mof]\nkeywords:\n  - zeolite\n---\n# T\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.tags == ("mof", "zeolite")

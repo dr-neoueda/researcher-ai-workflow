@@ -42,16 +42,18 @@ _GREEK = re.compile(r"[α-ω]")
 _CJK_RUN = re.compile(r"[぀-ヿ㐀-䶿一-鿿々ー]+")
 _HIRAGANA = re.compile(r"[぀-ゟ]+")
 _KANJI = re.compile(r"[㐀-䶿一-鿿々]")
-_LATIN_ACCENTED = re.compile(r"[À-ɏ]")
+_ACCENTED = re.compile(r"[À-ɏΆ-ώ]")  # アクセントつきのラテン文字・ギリシャ文字
 _KEY_LINE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$")
-_LIST_ITEM = re.compile(r"^\s+-\s+(.*)$")
+_LIST_ITEM = re.compile(r"^\s*-\s+(.*)$")  # 「  - 項目」も PyYAML の「- 項目」も
+_BLOCK_SCALAR = re.compile(r"^[>|][+-]?$")  # title: > や | の後の字下げした行
 _META_BULLET = re.compile(r"^\s*[-*]\s*\*\*(.+?)\*\*\s*[:：]\s*(.*)$")
 _META_KEYS = {
     "authors": "authors", "author": "authors", "著者": "authors", "year": "year", "年": "year", "発行年": "year",
     "journal": "journal", "誌名": "journal", "雑誌": "journal", "doi": "doi", "url": "url", "tags": "tags",
     "タグ": "tags", "keywords": "tags", "title": "title", "題名": "title", "タイトル": "title",
 }
-ENCODINGS = ("utf-8-sig", "cp932")
+UTF8_DAMAGE_SHARE = 0.05  # UTF-8 として読めないバイトが、非 ASCII のバイトのこの割合以下なら壊れた UTF-8 とみなす
+UTF16_NUL_SHARE = 0.3  # NUL のバイトがこの割合を超えたら BOM の無い UTF-16 とみなす
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,7 @@ class Paper:
     url: str
     tags: tuple[str, ...]
     sections: tuple[Section, ...]
+    encoding_note: str = ""  # UTF-8 でなく、文字コードを推定して読んだとき
 
 
 @dataclass(frozen=True)
@@ -82,8 +85,8 @@ class Hit:
 
 
 def _fold_latin(text: str) -> str:
-    """アクセントつきのラテン文字だけ、アクセントを外す（日本語の濁点は触らない）。"""
-    return _LATIN_ACCENTED.sub(
+    """アクセントつきのラテン文字・ギリシャ文字だけ、アクセントを外す（日本語の濁点は触らない）。"""
+    return _ACCENTED.sub(
         lambda m: "".join(c for c in unicodedata.normalize("NFKD", m.group(0)) if not unicodedata.combining(c)), text
     )
 
@@ -132,16 +135,24 @@ def _frontmatter(lines: list[str]) -> tuple[dict[str, object], int]:
         return {}, 0
     meta: dict[str, object] = {}
     key = None
+    block = False  # title: > の後の字下げした行を読んでいる
     for i, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
             return meta, i + 1
+        if block and key is not None and (line[:1].isspace() or not line.strip()):
+            meta[key] = " ".join(x for x in (str(meta.get(key) or ""), line.strip()) if x)
+            continue
+        block = False
         item, pair = _LIST_ITEM.match(line), _KEY_LINE.match(line)
         if item and key is not None:
             current = meta.get(key)
             meta[key] = [*(current if isinstance(current, list) else []), _strip_quotes(item.group(1))]
         elif pair:
-            key = pair.group(1)
-            meta[key] = _value(pair.group(2))
+            name = pair.group(1).lower()  # Title・DOI のような大文字のキーも
+            key = _META_KEYS.get(name, name)
+            block = bool(_BLOCK_SCALAR.match(pair.group(2).strip()))
+            if not meta.get(key):
+                meta[key] = "" if block else _value(pair.group(2))
         elif line.strip():
             return meta, i  # 閉じの --- が無い: ここから本文
     return meta, len(lines)
@@ -191,24 +202,47 @@ def _as_tuple(value: object) -> tuple[str, ...]:
     return (str(value),) if value else ()
 
 
-def _read_text(path: Path) -> str:
-    for encoding in ENCODINGS:
-        try:
-            return path.read_text(encoding=encoding)
-        except UnicodeDecodeError:
-            continue
-    raise UnicodeDecodeError("utf-8/cp932", b"", 0, 1, f"{path.name} は UTF-8 でも Shift_JIS でも読めない")
+def _utf16(data: bytes) -> str | None:
+    """UTF-16 なら読む（BOM、無ければ NUL のバイトの位置で判定）。違えば None。"""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16")
+    if not data or data.count(0) <= UTF16_NUL_SHARE * len(data):
+        return None
+    odd_nuls = data[1::2].count(0)  # 英字の多い UTF-16LE は奇数番目が NUL
+    return data.decode("utf-16-le" if odd_nuls >= data[0::2].count(0) else "utf-16-be")
+
+
+def _read_text(path: Path) -> tuple[str, str]:
+    """本文と、文字コードを推定したときの注記（UTF-8 なら空）。読めなければ UnicodeDecodeError。
+    cp932 は何でも読めてしまう（UTF-16 や壊れた UTF-8 を化けた字で読み、数に入るのに探せない）ので最後に試す。"""
+    data = path.read_bytes()
+    text = _utf16(data)
+    if text is not None:
+        return text, "UTF-16"
+    try:
+        return data.decode("utf-8-sig"), ""
+    except UnicodeDecodeError:
+        pass
+    damaged = data.decode("utf-8", errors="replace")
+    non_ascii = sum(1 for b in data if b >= 0x80)
+    if damaged.count("\ufffd") <= UTF8_DAMAGE_SHARE * non_ascii:
+        return damaged, f"UTF-8（壊れた文字 {damaged.count(chr(0xFFFD))} 個を置き換えた）"
+    text = data.decode("cp932")  # 読めなければ UnicodeDecodeError（読めないファイルに数える）
+    if "\x00" in text:
+        raise UnicodeDecodeError("cp932", data, 0, 1, f"{path.name} の文字コードが分からない")
+    return text, "Shift_JIS（cp932）"
 
 
 def load_paper(path: Path) -> Paper:
-    lines = _read_text(path).splitlines()
+    raw_text, note = _read_text(path)
+    lines = raw_text.splitlines()
     front, start = _frontmatter(lines)
     heading, sections = _sections(lines[start:])
     meta = {**_bullet_metadata(sections), **{k: v for k, v in front.items() if v}}
     return Paper(
         path=path, title=str(meta.get("title") or heading or path.stem), authors=_as_tuple(meta.get("authors")),
         year=str(meta.get("year") or ""), journal=str(meta.get("journal") or ""), doi=str(meta.get("doi") or ""),
-        url=str(meta.get("url") or ""), tags=_as_tuple(meta.get("tags")), sections=tuple(sections),
+        url=str(meta.get("url") or ""), tags=_as_tuple(meta.get("tags")), sections=tuple(sections), encoding_note=note,
     )
 
 
@@ -250,6 +284,10 @@ def _build_index(papers: list[Paper]) -> _Index:
         head = " ".join([paper.title, *paper.tags])
         head_tokens = _index_tokens(head)
         chunks.append(_Chunk(i, "題名・タグ", head, Counter(head_tokens), len(head_tokens), TITLE_WEIGHT))
+        biblio = " ".join(x for x in (*paper.authors, paper.journal, paper.year, paper.doi) if x)
+        if biblio:  # 「〇〇らの報告」・DOI・誌名でも探せるように（重みは本文と同じ）
+            tokens = _index_tokens(biblio)
+            chunks.append(_Chunk(i, "書誌", biblio, Counter(tokens), len(tokens), 1.0))
         for section in paper.sections:
             weight = SUMMARY_WEIGHT if section.name.lower() in SUMMARY_SECTIONS else 1.0
             tokens = _index_tokens(section.text)
@@ -336,11 +374,17 @@ def _shown(path: Path) -> str:
     return f'"{text}"' if any(c.isspace() for c in text) else text
 
 
-def _count_line(n_papers: int, library: Path, unreadable: list[Path]) -> str:
-    line = f"登録済み {n_papers} 本（{_shown(library)}）"
+def _names(paths: list[Path]) -> str:
+    return "、".join(p.name for p in paths[:5]) + ("…" if len(paths) > 5 else "")
+
+
+def _count_line(papers: list[Paper], library: Path, unreadable: list[Path]) -> str:
+    line = f"登録済み {len(papers)} 本（{_shown(library)}）"
+    guessed = [p.path for p in papers if p.encoding_note]
+    if guessed:
+        line += f"。文字コードを推定して読んだ {len(guessed)} 本（UTF-8 で保存し直すと確実）: {_names(guessed)}"
     if unreadable:
-        names = "、".join(p.name for p in unreadable[:5]) + ("…" if len(unreadable) > 5 else "")
-        line += f"。読めないファイル {len(unreadable)} 本（数に入れていない。UTF-8 で保存し直す）: {names}"
+        line += f"。読めないファイル {len(unreadable)} 本（数に入れていない。UTF-8 で保存し直す）: {_names(unreadable)}"
     return line
 
 
@@ -359,10 +403,11 @@ def _print_text(hits: list[Hit], count_line: str, n_papers: int, queries: list[s
         print(f"   合う節「{hit.section}」: {hit.snippet}")
 
 
-def _hits_json(hits: list[Hit], n_papers: int, library: Path, unreadable: list[Path]) -> str:
+def _hits_json(hits: list[Hit], papers: list[Paper], library: Path, unreadable: list[Path]) -> str:
     data = {
         "library": str(library),
-        "papers": n_papers,
+        "papers": len(papers),
+        "guessed_encoding": {str(p.path): p.encoding_note for p in papers if p.encoding_note},
         "unreadable": [str(p) for p in unreadable],
         "hits": [
             {
@@ -403,13 +448,12 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         print(f"要約のフォルダが見つかりません（読めません）: {library}", file=sys.stderr)
         return 2
-    count_line = _count_line(len(papers), library, unreadable)
-    if not papers:
-        print(f"登録済みの論文がまだありません（{count_line}）。Web で探して答え、役に立った論文は登録を提案する")
-        return 0
-    hits = search(papers, args.queries, args.top)
+    count_line = _count_line(papers, library, unreadable)
+    hits = search(papers, args.queries, args.top) if papers else []
     if args.json:
-        print(_hits_json(hits, len(papers), library, unreadable))
+        print(_hits_json(hits, papers, library, unreadable))
+    elif not papers:
+        print(f"{count_line}。登録済みの論文がまだありません。Web で探して答え、役に立った論文は登録を提案する")
     else:
         _print_text(hits, count_line, len(papers), args.queries)
     return 0
