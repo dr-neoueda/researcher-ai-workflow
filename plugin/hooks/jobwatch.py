@@ -73,6 +73,8 @@ LOCK_FRESH = 60.0  # 中身がまだ書かれていない印は、これより�
 START_FAILED = "_start_failed.json"
 HOOK_START_WAIT = 3.0  # hook から起動したとき心拍を待つ（秒）
 START_RETRY_AFTER = 600.0  # hook からの起動に失敗したら、これだけあけてから起動し直す（発言のたびに待たせない）
+REPLACE_ATTEMPTS = 5 if os.name == "nt" else 1  # Windows では読んでいる最中のファイルを置き換えられないので、やり直す
+REPLACE_PAUSE = 0.05  # やり直しの間（秒、回ごとに伸ばす）
 
 Notify = Callable[[str], None]
 Launch = Callable[[list[str]], None]
@@ -128,11 +130,24 @@ def _write_json(path: Path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def _replace(tmp: str, path: Path) -> None:
+    """一時ファイルで置き換える。Windows では別のプロセス（hook・status）が読んでいる最中だと
+    PermissionError になるので、REPLACE_ATTEMPTS 回までやり直す。"""
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPLACE_PAUSE * (attempt + 1))
 
 
 def _save(project: Path, job: Job) -> None:
@@ -368,7 +383,8 @@ def _pbs_check(job: Job) -> tuple[bool | None, str]:
     if problem:
         return None, problem
     text = res.stdout + res.stderr
-    if "Job has finished" in text or "Unknown Job" in text or res.returncode in (35, 153):
+    gone = "Job has finished" in text or "Unknown Job" in text  # 失敗したときの文だけを見る（ジョブ名などに同じ語があっても終わりにしない）
+    if res.returncode in (35, 153) or (res.returncode != 0 and gone):
         return False, "終了"
     if res.returncode != 0:
         return None, f"不明: qstat の終了コード {res.returncode}"
@@ -626,20 +642,39 @@ def watch(project: Path, interval: float = DEFAULT_INTERVAL, notify: Notify | No
     loops = 0
     try:
         while max_loops is None or loops < max_loops:
+            if not _owns_lock(project):  # 心拍が止まって見えた間（スリープ等）に別の見張りが引き継いだ
+                _log_line(project, f"見張り（pid {os.getpid()}）: 印を別の見張りが引き継いだので終わる")
+                break
             loops += 1
             _beat(project, interval)
             try:
-                watch_once(project, notify, lambda: _beat(project, interval))
+                watch_once(project, notify, lambda: _owns_lock(project) and _beat(project, interval))
             except Exception as exc:  # noqa: BLE001 — 1 回の失敗で見張りを止めない
                 print(f"{_now()} 見張りの 1 回に失敗（続ける）: {exc!r}", file=sys.stderr, flush=True)
             if not any(j.state == "running" for j in load_jobs(project)):
                 break
             time.sleep(interval)
     finally:
-        for name in (HEARTBEAT, LOCK):
-            with contextlib.suppress(OSError):
-                (_watch_dir(project) / name).unlink()
+        _release(project)
     return loops
+
+
+def _owns_lock(project: Path) -> bool:
+    try:
+        return (_watch_dir(project) / LOCK).read_text(encoding="utf-8").strip() == str(os.getpid())
+    except OSError:
+        return False
+
+
+def _release(project: Path) -> None:
+    """自分の印と心拍だけを消す（引き継いだ別の見張りのものは消さない）。"""
+    beat = _watch_dir(project) / HEARTBEAT
+    with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
+        if json.loads(beat.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            beat.unlink()
+    if _owns_lock(project):
+        with contextlib.suppress(OSError):
+            (_watch_dir(project) / LOCK).unlink()
 
 
 def _claim(project: Path) -> bool:
@@ -650,7 +685,7 @@ def _claim(project: Path) -> bool:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
-            if _lock_held(path):
+            if _lock_held(project, path):
                 return False
             with contextlib.suppress(OSError):
                 path.unlink()
@@ -661,14 +696,19 @@ def _claim(project: Path) -> bool:
     return False
 
 
-def _lock_held(path: Path) -> bool:
+def _lock_held(project: Path, path: Path) -> bool:
+    """見張りの印が、生きている見張りのものか。pid は再起動の後などに別のプロセスへ使い回されるので、
+    pid が生きていても、作ってから LOCK_FRESH 秒より古い印は、心拍が新しいときだけ使用中とみなす。"""
     try:
-        holder = int(path.read_text(encoding="utf-8").strip())
-    except ValueError:  # 作られた直後でまだ pid が無い
-        return time.time() - path.stat().st_mtime < LOCK_FRESH
-    except OSError:
+        age = time.time() - path.stat().st_mtime
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:  # 読む間に消えた
         return False
-    return _pid_alive(holder) is not False
+    if not text.isdigit():  # 作られた直後でまだ pid が無い
+        return age < LOCK_FRESH
+    if _pid_alive(int(text)) is False:
+        return False
+    return age < LOCK_FRESH or _watcher_alive(project)
 
 
 def wait(project: Path, key: str, interval: float = DEFAULT_INTERVAL, give_up_after: float = 3600.0) -> str:

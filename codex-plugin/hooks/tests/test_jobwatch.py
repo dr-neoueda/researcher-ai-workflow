@@ -1085,3 +1085,130 @@ def test_an_unsupported_lock_is_reported_once_per_job(project: Path, monkeypatch
         jw._update(project, job.key, "running", last_check=note)
     log = (project / "office" / "computation" / "watch" / "_watcher.log").read_text(encoding="utf-8")
     assert log.count(job.key) == 1
+
+
+# ---------- マージ前の確かめのレビュー（2026-11-12 python-reviewer）----------
+
+def _old(path: Path) -> None:
+    old = time.time() - 2 * jw.LOCK_FRESH
+    os.utime(path, (old, old))
+
+
+def _write_beat(project: Path, pid: int, age: float) -> Path:
+    beat = project / "office" / "computation" / "watch" / "_watcher.json"
+    beat.parent.mkdir(parents=True, exist_ok=True)
+    beat.write_text(json.dumps({"pid": pid, "beat": time.time() - age, "interval": 60}), encoding="utf-8")
+    return beat
+
+
+def test_a_lock_whose_pid_was_reused_is_taken_over(project: Path) -> None:
+    """見張りが kill -9・再起動で死に、印の pid を別の生きたプロセスが使っている（心拍は古い）。"""
+    jw.register(project, name="a", kind="local", job_id=str(_dead_pid()), tool="gaussian", log="x.log")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _old(_hold_lock(project, other.pid))
+        _write_beat(project, other.pid, age=10 * jw.STALE_AFTER)
+        loops = jw.watch(project, interval=0.01, notify=None, max_loops=5)
+    finally:
+        other.kill()
+        other.wait()
+    assert loops >= 1 and jw.load_jobs(project)[0].state == "finished"
+
+
+def test_a_reused_pid_lock_without_any_heartbeat_is_taken_over(project: Path) -> None:
+    jw.register(project, name="a", kind="local", job_id=str(_dead_pid()), tool="gaussian", log="x.log")
+    _old(_hold_lock(project, os.getpid()))
+    assert jw.watch(project, interval=0.01, notify=None, max_loops=5) >= 1
+
+
+def test_an_old_lock_of_a_watcher_that_still_beats_is_kept(project: Path) -> None:
+    jw.register(project, name="a", kind="local", job_id=str(_dead_pid()), tool="gaussian", log="x.log")
+    lock = _hold_lock(project, os.getpid())
+    _old(lock)                                           # 何時間も前から動いている見張り
+    _write_beat(project, os.getpid(), age=1.0)
+    assert jw.watch(project, interval=0.01, notify=None, max_loops=5) == 0
+    assert lock.read_text(encoding="utf-8") == str(os.getpid())
+
+
+def test_a_lock_that_vanishes_while_it_is_read_counts_as_free(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock = project / "office" / "computation" / "watch" / "_watcher.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("", encoding="utf-8")                # 作られた直後に読み、その間に消えた
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self.name == jw.LOCK:
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert jw._lock_held(project, lock) is False
+
+
+def test_a_watcher_that_lost_its_lock_stops_and_leaves_the_new_ones_files(
+    project: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """古い見張りの心拍が止まって見え、新しい見張りが印を引き継いだ（スリープの復帰など）。"""
+    live, _job = _live_job(project)
+    newcomer = 999_999
+    lock = project / "office" / "computation" / "watch" / "_watcher.lock"
+    calls: list[int] = []
+
+    def taken_over(_project: Path, _notify: object, beat: Callable[[], None] | None = None) -> list[str]:
+        calls.append(1)
+        lock.write_text(str(newcomer), encoding="utf-8")
+        _write_beat(project, newcomer, age=0.0)
+        if beat is not None:
+            beat()                                       # 引き継がれた後の、ジョブごとの心拍
+        return []
+
+    monkeypatch.setattr(jw, "watch_once", taken_over)
+    try:
+        loops = jw.watch(project, interval=0.01, notify=None, max_loops=5)
+    finally:
+        live.kill()
+        live.wait()
+    assert loops == 1 and len(calls) == 1
+    assert lock.read_text(encoding="utf-8") == str(newcomer)                          # 新しい見張りの印を消さない
+    beat = json.loads((project / "office" / "computation" / "watch" / "_watcher.json").read_text(encoding="utf-8"))
+    assert beat["pid"] == newcomer                                                   # 心拍も消さない
+
+
+def test_a_finished_watcher_still_removes_its_own_files(project: Path) -> None:
+    jw.register(project, name="a", kind="local", job_id=str(_dead_pid()), tool="gaussian", log="x.log")
+    jw.watch(project, interval=0.01, notify=None, max_loops=5)
+    watch_dir = project / "office" / "computation" / "watch"
+    assert not (watch_dir / "_watcher.lock").exists() and not (watch_dir / "_watcher.json").exists()
+
+
+def test_pbs_text_that_looks_like_an_error_does_not_finish_a_running_job(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = "Job Id: 77.pbs\n    Job_Name = Unknown Job has finished\n    job_state = R\n"
+    _with_path(monkeypatch, _fake_bin(tmp_path, "qstat", f"printf '%s' '{output}'\nexit 0\n"))
+    job = jw.register(project, name="x", kind="pbs", job_id="77.pbs", tool="gaussian", log="x.log")
+    assert jw.is_running(job) is True
+
+
+def test_a_record_held_open_by_a_reader_is_retried(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows では、別のプロセスが読んでいる最中のファイルへの置き換えが PermissionError になる。"""
+    job = jw.register(project, name="a", kind="local", job_id="1", tool="gaussian", log="x.log")
+    real_replace = os.replace
+    failures = [PermissionError(13, "in use"), PermissionError(13, "in use")]
+
+    def replace(src: str, dst: object) -> None:
+        if failures:
+            raise failures.pop()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(jw, "REPLACE_ATTEMPTS", 5)
+    monkeypatch.setattr(jw, "REPLACE_PAUSE", 0.0)
+    monkeypatch.setattr(jw.os, "replace", replace)
+    assert jw._update(project, job.key, "running", last_check="ok") is not None
+    assert jw.load_job(project, job.key).last_check == "ok"
+
+
+def test_a_fresh_lock_before_the_first_heartbeat_counts_as_held(project: Path) -> None:
+    jw.register(project, name="a", kind="local", job_id=str(_dead_pid()), tool="gaussian", log="x.log")
+    _hold_lock(project, os.getpid())                     # 印を取った直後で、まだ心拍を書いていない
+    assert jw.watch(project, interval=0.01, notify=None, max_loops=5) == 0
