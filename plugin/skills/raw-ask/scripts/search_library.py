@@ -52,6 +52,7 @@ _META_KEYS = {
     "journal": "journal", "誌名": "journal", "雑誌": "journal", "doi": "doi", "url": "url", "tags": "tags",
     "タグ": "tags", "keywords": "tags", "title": "title", "題名": "title", "タイトル": "title",
 }
+_DOI_LINK = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.I)  # 書誌の索引に https・doi・org を入れない
 UTF8_DAMAGE_SHARE = 0.05  # UTF-8 として読めないバイトが、非 ASCII のバイトのこの割合以下なら壊れた UTF-8 とみなす
 UTF16_NUL_SHARE = 0.3  # NUL のバイトがこの割合を超えたら BOM の無い UTF-16 とみなす
 
@@ -136,23 +137,31 @@ def _frontmatter(lines: list[str]) -> tuple[dict[str, object], int]:
     meta: dict[str, object] = {}
     key = None
     block = False  # title: > の後の字下げした行を読んでいる
+    keep_block = False  # その行を値にするか（同じキーの 2 回目なら読み捨てる）
     for i, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
             return meta, i + 1
         if block and key is not None and (line[:1].isspace() or not line.strip()):
-            meta[key] = " ".join(x for x in (str(meta.get(key) or ""), line.strip()) if x)
+            if keep_block:
+                meta[key] = " ".join(x for x in (str(meta.get(key) or ""), line.strip()) if x)
             continue
         block = False
         item, pair = _LIST_ITEM.match(line), _KEY_LINE.match(line)
         if item and key is not None:
             current = meta.get(key)
+            if isinstance(current, str) and current:  # 値のあるキーの後の「- 」は本文（閉じていない frontmatter）
+                return meta, i
             meta[key] = [*(current if isinstance(current, list) else []), _strip_quotes(item.group(1))]
         elif pair:
             name = pair.group(1).lower()  # Title・DOI のような大文字のキーも
             key = _META_KEYS.get(name, name)
-            block = bool(_BLOCK_SCALAR.match(pair.group(2).strip()))
-            if not meta.get(key):
-                meta[key] = "" if block else _value(pair.group(2))
+            is_block = bool(_BLOCK_SCALAR.match(pair.group(2).strip()))
+            current, value = meta.get(key), ("" if is_block else _value(pair.group(2)))
+            block, keep_block = is_block, not current
+            if not current:  # 同じキーが 2 回なら先の値を残す（リストどうしは合わせる: tags と keywords）
+                meta[key] = value
+            elif isinstance(current, list) and isinstance(value, list):
+                meta[key] = [*current, *value]
         elif line.strip():
             return meta, i  # 閉じの --- が無い: ここから本文
     return meta, len(lines)
@@ -284,7 +293,8 @@ def _build_index(papers: list[Paper]) -> _Index:
         head = " ".join([paper.title, *paper.tags])
         head_tokens = _index_tokens(head)
         chunks.append(_Chunk(i, "題名・タグ", head, Counter(head_tokens), len(head_tokens), TITLE_WEIGHT))
-        biblio = " ".join(x for x in (*paper.authors, paper.journal, paper.year, paper.doi) if x)
+        doi = _DOI_LINK.sub("", paper.doi)
+        biblio = " ".join(x for x in (*paper.authors, paper.journal, paper.year, doi) if x)
         if biblio:  # 「〇〇らの報告」・DOI・誌名でも探せるように（重みは本文と同じ）
             tokens = _index_tokens(biblio)
             chunks.append(_Chunk(i, "書誌", biblio, Counter(tokens), len(tokens), 1.0))

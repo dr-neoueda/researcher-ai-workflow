@@ -394,3 +394,37 @@ def test_tags_and_keywords_are_merged(tmp_path: Path) -> None:
     (lib / "k.md").write_text("---\ntitle: T\ntags: [mof]\nkeywords:\n  - zeolite\n---\n# T\n", encoding="utf-8")
     (paper,) = sl.load_library(lib)
     assert paper.tags == ("mof", "zeolite")
+
+
+# ---------- 確かめの周 2（2026-11-12）----------
+
+def test_inline_tags_and_inline_keywords_are_merged(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "k.md").write_text("---\ntitle: T\ntags: [a1, b2]\nkeywords: [c3, d4]\n---\n# T\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.tags == ("a1", "b2", "c3", "d4")
+
+
+def test_a_bullet_after_a_scalar_in_an_unclosed_frontmatter_starts_the_body(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "u.md").write_text("---\ntitle: X\nyear: 2020\n- **Authors**: Kim A\n\n## Results\nok\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.title == "X" and paper.year == "2020" and paper.authors == ("Kim A",)
+
+
+def test_a_repeated_key_does_not_append_its_block_to_the_first_value(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "r.md").write_text("---\ntitle: X\nTitle: >\n  Y\nyear: 2001\n---\n# H\n", encoding="utf-8")
+    (paper,) = sl.load_library(lib)
+    assert paper.title == "X" and paper.year == "2001"
+
+
+def test_the_doi_link_prefix_is_not_indexed(tmp_path: Path) -> None:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "d.md").write_text("---\ntitle: T\ndoi: https://doi.org/10.1/xyz\n---\n# T\n\n## 本文\nzeolite\n", encoding="utf-8")
+    papers = sl.load_library(lib)
+    assert sl.search(papers, ["https"]) == [] and sl.search(papers, ["10.1/xyz"])
