@@ -101,8 +101,9 @@ def test_extract_path_blocks_on_real_departments():
     for dept in ("research", "engineering", "computation", "experiment",
                  "analysis", "writing", "review", "presentation"):
         assert f"{dept}/CLAUDE.md" in blocks, dept
+    assert "experiment/templates/measurement-info.md" in blocks
     assert not any("<" in p for p in blocks)
-    assert len(blocks) == 10
+    assert len(blocks) == 11
 
 
 def test_all_playbook_starters_are_extractable():
@@ -455,3 +456,46 @@ def test_main_cli_bad_json(tmp_path, capsys):
     rc = scaffold.main(["--config", str(bad), "--skill", str(SKILL_DIR), "--out", str(tmp_path)])
     assert rc == 2
     assert "invalid JSON" in capsys.readouterr().err
+
+
+# --- v2.1: 測定データの置き場・確かめ方の決まり ---------------------------------
+
+
+@pytest.mark.parametrize("flag", [None, False, True])
+def test_experiments_dir_is_always_created(tmp_path, config, flag):
+    cfg = {k: v for k, v in config.items() if k != "wants_experiment_dir"}
+    if flag is not None:
+        cfg["wants_experiment_dir"] = flag  # 旧い設定のキーは受け取って無視する
+    scaffold.scaffold(cfg, SKILL_DIR, tmp_path)
+    readme = (tmp_path / "work" / "experiments" / "README.md").read_text(encoding="utf-8")
+    assert "<試料 ID>/<手法>/" in readme and "info.md" in readme
+
+
+@pytest.mark.parametrize("skill", [SKILL_DIR, CODEX_SKILL])
+def test_measurement_record_template_is_placed_for_the_experiment_dept(tmp_path, config, skill):
+    scaffold.scaffold(config, skill, tmp_path)
+    tmpl = (tmp_path / "office" / "experiment" / "templates" / "measurement-info.md").read_text(encoding="utf-8")
+    for key in ("sample:", "technique:", "date:", "移動前", "移動後"):
+        assert key in tmpl, key
+
+
+@pytest.mark.parametrize("skill,root", [(SKILL_DIR, "CLAUDE.md"), (CODEX_SKILL, "AGENTS.md")])
+def test_root_rules_carry_the_six_verification_rules(tmp_path, config, skill, root):
+    scaffold.scaffold(config, skill, tmp_path)
+    body = (tmp_path / "office" / root).read_text(encoding="utf-8")
+    section = body.split("### 確かめ方の決まり", 1)[1].split("\n## ", 1)[0]
+    assert re.findall(r"^(\d)\. \*\*", section, flags=re.M) == ["1", "2", "3", "4", "5", "6"]
+
+
+def test_experiment_dept_points_measurement_data_to_the_sample_folders(tmp_path, config):
+    scaffold.scaffold(config, SKILL_DIR, tmp_path)
+    dept = (tmp_path / "office" / "experiment" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "work/experiments/<試料 ID>/<手法>/" in dept
+    assert "measurement-info.md" in dept and "ファイル数" in dept
+
+
+def test_output_table_names_the_real_slides_folder(tmp_path, config):
+    scaffold.scaffold(config, SKILL_DIR, tmp_path)
+    body = (tmp_path / "office" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "| `slides/` |" not in body
+    assert "| `work/presentations/` |" in body

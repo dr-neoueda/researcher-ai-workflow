@@ -123,6 +123,12 @@ python3 ${SKILL}/scripts/make_preview.py work/presentations/slides/_src/<deck> <
 **全ページを絵で見る。** 文字と画像・文字と枠の重なりと、図の中の文字はゲートが見ない（`design-system.md` §10）。Chrome か Edge が要る。プレビューは 1280×720 を検定する。
 
 ### Step F: 文章の見直し
+**数値の照合（ビルドのたびに必ず）**：スライドの数は、`_src/<deck>/facts.md`（または元になった原稿の `work/manuscripts/<doc-slug>/facts.md`）からだけ写す。書き出した pptx の数を機械で抜き出して照合する（生成器のコードではなく、出来上がった pptx に掛ける）。
+```bash
+python3 ${SKILL}/../raw-write/scripts/check_numbers.py work/presentations/slides/<deck>.pptx --facts work/presentations/slides/_src/<deck>/facts.md
+```
+「一覧に無い数」は一次記録で引き直して一覧に足す。「指数だけ違う・符号が違う・丸め方が合わない」は一覧の書き方か誤りかを確かめる。終了コード 0 になってから渡す（照合の読み方は `raw-write` の Step 5 と同じ）。
+
 `design-system.md` §2・§11 に照らして文字を検索する。「—」、話し言葉（合う・使って・ほぼ同じ・だけ・？）、経緯の語り（以前・やり直・訂正・実は・判明）、見出しの人名。枚を外したら「補足 N」などの相互参照も数え直す。
 
 ### Step G: 動画を貼るとき

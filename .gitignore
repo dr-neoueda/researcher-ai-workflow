@@ -32,3 +32,4 @@ __pycache__/
 
 # raw-slides smoke test artifacts (top-level presentations/ from running templates)
 presentations/
+.coverage

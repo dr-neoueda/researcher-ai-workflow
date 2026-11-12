@@ -96,6 +96,7 @@ TOOL_DIRS: dict[str, tuple[str, str]] = {
 }
 
 # always-created domain work dirs -> README one-liner
+# (work/experiments も v2.1 から常に作る。旧い設定の wants_experiment_dir は無視する)
 DOMAIN_DIRS: dict[str, str] = {
     "papers": "`pdf/`＝原本 PDF ／ `md/`＝文献要約。PDF を `pdf/` に入れて「登録して」で `raw-register` が書誌付き要約を `md/<著者-年>.md` に整理します。",
     "topics": "調査トピック・文献リスト（`raw-research` が作る HTML）。",
@@ -103,6 +104,12 @@ DOMAIN_DIRS: dict[str, str] = {
     "presentations/slides": "発表資料・論文紹介スライド（`.pptx`）。SVG ソースは `_src/<deck>/`（再生成用）。",
     "presentations/figures": "スライドに載せたい画像をここに入れておくと『スライド作って』で `raw-slides` が拾い、縦横比を保って埋め込みます（PNG/JPEG/SVG。例 `xrd_120C.png`）。",
     "analyses": "解析結果（1 トピック 1 サブフォルダ）。",
+    "experiments": (
+        "測定データと測定の記録（1 試料 1 フォルダ）。生データは `<試料 ID>/<手法>/`（例 `S-001/pxrd/`）に置き、"
+        "各フォルダに測定の記録 `info.md`（雛形は `office/experiment/templates/measurement-info.md`）を付けます。"
+        "試料に紐づかない校正データは `_calibration/`。生データを `inbox/` に入れて「取り込んで」と言えば、"
+        "`raw-intake` が試料 ID・手法・条件を確かめて振り分けます。実験ノートは `office/experiment/notebook/`。"
+    ),
     "notebooks": "Jupyter Notebook。",
     "figures": "解析・論文・スライド用の図表（presentation と共有）。",
     "scripts": "単発・一時スクリプト。",
@@ -518,14 +525,7 @@ def scaffold(config: dict[str, Any], skill_dir: Path, out_dir: Path, *, force: b
     (out_dir / "work" / "papers" / "pdf").mkdir(parents=True, exist_ok=True)
     (out_dir / "work" / "papers" / "md").mkdir(parents=True, exist_ok=True)
 
-    # 7. optional experiment work dir
-    if config.get("wants_experiment_dir"):
-        emit(
-            out_dir / "work" / "experiments" / "README.md",
-            "# work/experiments\n\n実験記録（`exp_<name>_<date>.md`）・測定データ。\n",
-        )
-
-    # 8. integrated inbox
+    # 7. integrated inbox
     emit(out_dir / "inbox" / "README.md", INBOX_README)
 
     return written
