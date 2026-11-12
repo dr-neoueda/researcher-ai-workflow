@@ -483,7 +483,7 @@ def test_measurement_record_template_is_placed_for_the_experiment_dept(tmp_path,
 def test_root_rules_carry_the_six_verification_rules(tmp_path, config, skill, root):
     scaffold.scaffold(config, skill, tmp_path)
     body = (tmp_path / "office" / root).read_text(encoding="utf-8")
-    section = body.split("### 確かめ方の決まり", 1)[1].split("\n## ", 1)[0]
+    section = body.split("### 確かめ方の決まり", 1)[1].split("\n## ", 1)[0].split("\n### ", 1)[0]
     assert re.findall(r"^(\d)\. \*\*", section, flags=re.M) == ["1", "2", "3", "4", "5", "6"]
 
 
@@ -499,3 +499,15 @@ def test_output_table_names_the_real_slides_folder(tmp_path, config):
     body = (tmp_path / "office" / "CLAUDE.md").read_text(encoding="utf-8")
     assert "| `slides/` |" not in body
     assert "| `work/presentations/` |" in body
+
+
+@pytest.mark.parametrize("skill,root", [(SKILL_DIR, "CLAUDE.md"), (CODEX_SKILL, "AGENTS.md")])
+def test_root_rules_require_a_watch_on_every_job(tmp_path, config, skill, root):
+    scaffold.scaffold(config, skill, tmp_path)
+    body = (tmp_path / "office" / root).read_text(encoding="utf-8")
+    section = body.split("### 計算の見張り", 1)[1].split("\n## ", 1)[0]
+    assert re.findall(r"^(\d)\. \*\*", section, flags=re.M) == ["1", "2", "3", "4", "5"]
+    for word in ("jobwatch.py register", "ensure-watcher", "judge", "終了コード"):
+        assert word in section, word
+    dept = (tmp_path / "office" / "computation" / root).read_text(encoding="utf-8")
+    assert "jobwatch.py register" in dept

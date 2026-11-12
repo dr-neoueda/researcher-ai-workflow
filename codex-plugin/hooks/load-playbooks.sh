@@ -55,6 +55,19 @@ if [ -d "$playbooks_dir" ]; then
     fi
 fi
 
+py="$(hook_python)"
+if [ -n "$py" ]; then
+    echo "### 計算の見張り（raw の決まり・必ず）"
+    echo ""
+    echo "裏で走らせる計算と HPC のジョブには、投入したらユーザーに頼まれなくても必ず見張りを付け、完走まで見る:"
+    echo "register で登録 → ensure-watcher で見張りを起動 →（Claude Code は wait <key> を裏で走らせる）→ 終わったら judge で判定"
+    echo "（終了コードでは決めない）→ ジョブ記録と Playbook に反映し、同じ応答で次に投入するものを決める。詳しくは office/ の設定ファイルの「計算の見張り」。"
+    echo "見張りの道具: $py \"$HOOK_DIR/jobwatch.py\""
+    echo ""
+    "$py" "$HOOK_DIR/jobwatch.py" pending --project "$project_dir" --start-watcher 2>/dev/null
+    echo ""
+fi
+
 today=$(date +%F)
 todo_file="$company_dir/secretary/todos/$today.md"
 if [ -s "$todo_file" ]; then

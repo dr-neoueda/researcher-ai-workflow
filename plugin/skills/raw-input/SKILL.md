@@ -41,7 +41,7 @@ Q1: どの計算ソフトの入力ファイルを生成しますか？
   - その他（Other 自由入力：Psi4 / NWChem / OpenMolcas / xtb・CREST / LAMMPS / AMBER / OpenMM / AutoDock Vina / PHREEQC 等）
 ```
 
-> **エンジン方言アダプタ方式（新エンジンはスキルを増やさず拡張）**：入力生成を **「幾何（座標）＋メソッド指定（汎関数/基底/計算種）＋エンジン方言アダプタ（各ソフトの入力文法）」** の 3 層に分けて考える。上記リストに無いエンジンを頼まれたら、**per-engine のテンプレート 1 枚**（最小入力の骨格＋そのエンジンの方言メモ）を `office/computation/playbooks/<engine>.md` に足すだけで対応する（新スキルは作らない）。需要の高い次のものは **raw-analyze の「その場実装＋playbook」好例**として標準レシピ化してよい：**CREST/xtb**（配座探索）・**DP4+ 相当**（Boltzmann 平均＋Student-t の NMR 帰属、純 numpy で容易）・**PHREEQC**（`phreeqpython`）・**AutoDock Vina**（ドッキング）。**計算入力の文法は必ずベンダー一次資料で裁定**（memory `feedback_comp_input_template_primary_source`：`! CASSCF` 欠落で HF が黙って走る等）。HPC/長時間ジョブは既存 tmux/SLURM 規約（`office/computation` playbook）に従う。
+> **エンジン方言アダプタ方式（新エンジンはスキルを増やさず拡張）**：入力生成を **「幾何（座標）＋メソッド指定（汎関数/基底/計算種）＋エンジン方言アダプタ（各ソフトの入力文法）」** の 3 層に分けて考える。上記リストに無いエンジンを頼まれたら、**per-engine のテンプレート 1 枚**（最小入力の骨格＋そのエンジンの方言メモ）を `office/computation/playbooks/<engine>.md` に足すだけで対応する（新スキルは作らない）。需要の高い次のものは **raw-analyze の「その場実装＋playbook」好例**として標準レシピ化してよい：**CREST/xtb**（配座探索）・**DP4+ 相当**（Boltzmann 平均＋Student-t の NMR 帰属、純 numpy で容易）・**PHREEQC**（`phreeqpython`）・**AutoDock Vina**（ドッキング）。**計算入力の文法は必ずベンダー一次資料で裁定**（例: ORCA で `! CASSCF` の行が抜けると、エラーにならずに HF だけが走る）。投入したジョブには必ず見張りを付ける（Step 8・`office/` の決まり「計算の見張り」）。
 
 選択されたソフトに対応する Playbook を最初に読む：
 - `office/computation/playbooks/<tool>.md`（存在しない場合は `references/playbook-starters.md` から該当セクションを参照）
@@ -249,6 +249,16 @@ cd ../../../<tool>/<system>_<purpose>_<YYYYMMDD>/
 
 実行後、log の確認は秘書に「結果を確認して」と伝えてください。
 ```
+
+### Step 8: 投入するとき（見張りを必ず付ける）
+
+ユーザーに投入を頼まれたら、`office/` の決まり「計算の見張り」に従い、**投入と同時に見張りを付ける**（頼まれなくても）：
+
+1. 数分で終わらない計算は、セッションを閉じても止まらない形で走らせる（ローカルは tmux、HPC は qsub / sbatch）
+2. `jobwatch.py register` で登録する（`--tool <ソフト>`・`--log`・PID かジョブ ID。Gaussian の opt+freq なら `--expect-count 2`。HPC が別の計算機なら `--host`）。道具のパスは起動時の文脈の「見張りの道具」にある
+3. `jobwatch.py ensure-watcher` で見張りを起動し、Claude Code では `jobwatch.py wait <key>` を裏で走らせる
+4. ユーザーに「何を・どの間隔で見ているか」と「予想の所要時間」を伝え、ジョブ記録の「結果」に登録の key を書く
+5. 終わったら `jobwatch.py judge <key>` で判定し（終了コードでは決めない）、ジョブ記録と Playbook に反映して、同じ応答で次に投入するものを決める
 
 ---
 
