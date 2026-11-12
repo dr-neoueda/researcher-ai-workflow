@@ -2,7 +2,7 @@
 
 > **研究者のための AI エージェント導入伴走** — 電気通信大学 SPRING リカレント・リスキリング商品
 
-**配布版：plugin 2.1.0 / Codex 2.1.0 / Copilot 1.46.0（保留中・旧名 caw）/ Gemini 1.49.0（凍結）**
+**配布版：plugin 2.2.0 / Codex 2.2.0 / Copilot 1.46.0（保留中・旧名 caw）/ Gemini 1.49.0（凍結）**
 現状と次の一手は [`RESUME.md`](./RESUME.md)、変更の全履歴は [`CHANGELOG.md`](./CHANGELOG.md) を参照。
 
 > **プラグイン `raw` は無料です。** 商品はプラグインそのものではなく、研究者が自分の研究に合わせて
@@ -65,8 +65,8 @@ codex plugin add raw@researcher-ai-workflow
 
 | CLI | 位置づけ | 状態 |
 |---|---|---|
-| **Codex CLI** | **Tier 1（本命）** | 15 スキル。Hooks は移植予定 |
-| **Claude Code** | Tier 2 | 15 スキル ＋ Hooks 3 本（Codex 版と byte 一致ミラー） |
+| **Codex CLI** | **Tier 1（本命）** | 15 スキル ＋ Hooks 3 本（Claude Code 版と同じファイル。最初に `/hooks` で承認） |
+| **Claude Code** | Tier 2 | 15 スキル ＋ Hooks 3 本（Codex 版と同じファイル） |
 | **Gemini CLI** | 参考 | 15 コマンド。**実地検証で「無料枠では初期構築すら完了不可」と判明**（有料 API 前提） |
 | **Copilot CLI** | 保留中 | v1.78 の内容（化学者向け・旧名 `caw`）のまま。再開の手順は `copilot-plugin/PAUSED.md` |
 

@@ -8,7 +8,7 @@
 
 | 項目 | 値 |
 |---|---|
-| **配布版** | plugin **2.1.0** / codex 2.1.0 / copilot 1.46.0（**保留中**・旧名 caw）/ gemini 1.49.0（凍結） |
+| **配布版** | plugin **2.2.0** / codex 2.2.0 / copilot 1.46.0（**保留中**・旧名 caw）/ gemini 1.49.0（凍結） |
 | **直近の作業** | v2.1 系：研究側の更新を 4 本の PR で進めている（2026-11-10 承認）。PR 1＝測定データの置き場の統一・確かめ方の決まり 6 行・数値の照合（`check_numbers.py`）。続き：PR 2＝Codex 版に hook → PR 3＝計算の見張りを既定に（`jobwatch`）→ PR 4＝`raw-ask`（登録論文から答え、無ければ Web で URL つき）。**就活トラックは v2.0.1 で開発終了**（2026-11-10 ユーザー決定。削除はしない） |
 | テスト | `plugin/skills` 全体で 514 passed（scaffold 77・check_numbers 236） |
 | 配布元 | https://github.com/dr-neoueda/researcher-ai-workflow（2026-11-06 に `chemist-ai-workflow` から改名。旧 URL は GitHub が転送） |
@@ -62,7 +62,7 @@
 
 | CLI | 状態 |
 |---|---|
-| **Codex CLI**（Tier 1・**本命**） | 15 スキル。**Hooks は未移植（要対応）**。選定理由＝**5 時間ウィンドウが撤廃され週次上限のみ**（2026-07-12 に OpenAI が撤廃、8 月時点で継続中）＝**伴走の 3 時間セッションが途中で上限に当たらない** |
+| **Codex CLI**（Tier 1・**本命**） | 15 スキル ＋ Hooks 3 本（v2.2.0、Claude Code 版と同じファイル。`/hooks` で承認が要る）。選定理由＝**5 時間ウィンドウが撤廃され週次上限のみ**（2026-07-12 に OpenAI が撤廃、8 月時点で継続中）＝**伴走の 3 時間セッションが途中で上限に当たらない** |
 | **Claude Code**（Tier 2） | 15 スキル ＋ Hooks 3 本（SessionStart / PostToolUse / Stop）。実装は最も厚い |
 | **Copilot CLI**（企業向け） | ✅ **2026-08-21 に 15 スキルへフルポート完了**。13 スキルは Codex 版と byte 一致（consistency がディレクトリ単位で強制）。**hooks 未移植**・**`caw-slides` の Windows 実機確認が未実施**。**2026-11-06 から開発を保留**（v1.78 の内容・旧名 `caw` のまま。`copilot-plugin/PAUSED.md`） |
 | **Gemini CLI** | ⛔ **2026-08-21 凍結・非推奨**。無料枠ではオンボーディングを完走できず、商品モデル（導入伴走）でも勧める場面が無い。追従させない。`gemini-plugin/FROZEN.md` 参照 |
@@ -97,7 +97,7 @@
 | # | タスク | 状態 | メモ |
 |---|---|---|---|
 | T1 | **Copilot CLI の実機動作確認** | 🔲 未着手（後回し・2026-08-24 ユーザー判断） | 15 スキルへフルポート済みだが **Copilot CLI を一度も起動していない**。`docs/copilot-compatibility.md` は 2026-06-04 の**机上調査**。テスト会 2 回はどちらも Claude Code。README の見出しが「インストール（**リポジトリ公開・marketplace 設定後**）」＝ install 手順が未実行。**Codex は実機で誤りが判明し 2 ステップに修正された履歴があるが Copilot には無い**ため、現在の `copilot plugin install raw` は同型の誤りの可能性。ローカルに `copilot` 未導入 |
-| T2 | **Codex 版への hooks 移植** | 🔲 未着手 | 下記詳細 |
+| T2 | **Codex 版への hooks 移植** | 🟡 v2.2.0 で実装・実機確認待ち | 下記詳細 |
 | T3 | **`raw-slides` の Windows 実機確認** | 🔲 未着手 | v1.78.0 の `build_deck` / `make_preview` / `fig_style` も Windows 実機では未確認（MS ゴシック・Chrome/Edge の場所は OS ごとに探す実装） |
 | T8 | **`raw-slides` の動画の PowerPoint 実再生** | 🔲 未着手 | XML と参照までは検定済み。PowerPoint を開いての自動再生・ループは未確認 |
 | T4 | **USB 配布の仕組み** | ✅ **2026-08-24 実装・実測済** | `scripts/make-offline-bundle.sh` でバンドル生成（3.1 MB・3 CLI 分・byte 一致検証つき）。受け取る側は `install.sh` / `install.ps1` を実行するだけ。詳細は下記 |
@@ -207,29 +207,21 @@ raw は CLI がモデル API を呼ぶので**ネットワークは必須**。US
 （実体 `~/.codex/.tmp/marketplaces/researcher-ai-workflow/codex-plugin`）。
 作業リポジトリは **codex 1.76.0** なので、**本セッションの未コミット変更は実環境に未反映**。
 
-## 追跡タスク T2 詳細：Codex 版への hooks 移植（本命なのに未実装）
+## 追跡タスク T2 詳細：Codex 版への hooks 移植（v2.2.0 で実装・実機確認待ち）
 
-2026-08-21 に**本命を Claude Code → Codex CLI に変更**した（理由＝Codex は 2026-07-12 に
-**5 時間ウィンドウが撤廃され週次上限のみ**になり、**伴走の 3 時間セッションが途中で上限に当たらない**）。
-その結果、**本命トラックに hooks が無い**状態になっている。
+2026-11-10 に実装した（PR 2）。Claude Code 版と Codex 版は**同じ hooks/ を同梱**する（consistency がバイト一致を強制）。
 
-Codex CLI は hooks を**公式にサポート**している（`SessionStart` / `PostToolUse` / `Stop` 他、
-プラグインが `hooks/hooks.json` で同梱可、`.codex-plugin/plugin.json` の `"hooks"` で明示も可、
-**Windows 対応**、**既定で有効**、`PLUGIN_ROOT` と互換の `CLAUDE_PLUGIN_ROOT` の両方が使える）。
-
-**ただし単純コピーではない。3 つの適応が要る：**
-
-| # | 差分 | 対応 | 重さ |
-|---|---|---|---|
-| a | `CLAUDE_PROJECT_DIR` が存在しない | **stdin JSON の `cwd`** から取る（全 3 スクリプト） | 軽 |
-| b | 出力形式が違う | 素のテキストではなく `{"hookSpecificOutput":{"hookEventName":"...","additionalContext":"..."}}` で包む | 軽 |
-| c | **PostToolUse の対象ツールが違う** | Claude は `Edit\|Write\|MultiEdit` ＋ `tool_input.file_path`。**Codex は `apply_patch` で入力が patch 文字列＝`file_path` が無い**ため、patch を解析して書き込み先を取り出す別実装が要る | **重** |
-
-**推奨する分割**：`SessionStart`（文脈注入）と `Stop`（learnings 記録の督促）は a+b だけで移植でき、
-価値も大きいので先に入れる。`PostToolUse`（成果物配置の二層原則チェック）は c があるので別途。
-
-⚠️ **移植したら必ず実機で発火を確認すること。** フィールド名を間違えると
-**hooks は無言で何もしない**（落ちない）ので、書けたことは動くことの証拠にならない。
+- **入力**：両 CLI とも標準入力の JSON。プロジェクトは `CLAUDE_PROJECT_DIR` → JSON の `cwd` → いまの場所 の順に上へたどって
+  `office/` を探す。書き込み先は Claude の `tool_input.file_path` と、Codex の `apply_patch` のパッチの
+  `*** Add/Update/Delete File:`・`*** Move to:` の行から読む（`hooks/_hookio.py`。jq は使わない）
+- **出力**：SessionStart は標準出力（両 CLI で文脈に入る）。**PostToolUse と Stop は標準エラー＋終了コード 2**
+  （**標準出力＋0 は Claude Code では Claude に届かず、デバッグのログに行くだけ**＝v2.1 まで置き場所の警告と学びの催促は
+  Claude に届いていなかった。公式資料 code.claude.com/docs/en/hooks で確認）。Stop は `stop_hook_active` で 1 回だけ
+- **Codex の承認**：プラグインの hook は `/hooks` で信頼するまで動かない。更新で中身が変わると再承認（オンボーディングの
+  完了メッセージ・raw-setup・Codex 版 README で案内）
+- **テスト**：`plugin/hooks/tests/`（21 件。Claude と Codex の入力の形、python の無い環境）
+- ✅ **Claude Code 2.1.322 の実機で確認済み**（2026-11-10、`claude -p --plugin-dir`）：起動時の文脈・置き場所の警告・学びの催促（Stop で引き戻され learnings を作った）の 3 つとも Claude に届いた
+- ⚠️ **残り：Codex の実機での確認**（`/hooks` の承認の流れと、3 つが実際に届くこと）
 
 ## 再開時にまず確認すべきファイル
 

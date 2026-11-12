@@ -77,6 +77,20 @@ your-research-project/
 - **Playbook 雛形**：Gaussian / GROMACS / CP2K / ORCA / VASP / Quantum ESPRESSO / Psi4 / NAMD / LAMMPS / OpenMM / ChimeraX + 汎用
 - **作業ディレクトリ自動生成**：選択した計算ソフトと部署に応じて配置。投入用 `inbox/` と過去データ用 `_past-data/` も生成
 
+## 自動の仕組み（hook）
+
+Claude Code 版と同じ 3 つの hook を同梱している（`hooks/`、Claude Code 版と同じファイル）。
+
+| いつ | 何をするか |
+|---|---|
+| 起動したとき | 直近の決定・学び、Playbook の一覧、今日の TODO を読み込む |
+| ファイルを書いたとき | 成果物を `office/` の中に書いたら、`work/` へ移すよう伝える |
+| 終わる前 | 今日の活動があるのに学びのノートが無ければ、書くよう引き戻す（1 回だけ） |
+
+**Codex では最初に承認が要る。** インストールしたら Codex で `/hooks` と入力し、raw の 3 つを「信頼（trust）」にする。
+プラグインを更新して中身が変わったときも、もう一度確認が出る。承認するまで hook は動かない（エラーにもならない）。
+置き場所の見張りは Python を使う（`raw-setup` が入れる）。
+
 ## Claude Code 版との関係
 
 | 観点 | Claude Code 版 (`plugin/`) | Codex 版 (`codex-plugin/`) |
@@ -86,6 +100,7 @@ your-research-project/
 | 生成される指示ファイル | `<dept>/CLAUDE.md` | `<dept>/AGENTS.md` |
 | インストール | `/plugin install raw@researcher-ai-workflow` | `codex plugin install raw` |
 | スキル本体（プロンプト指示） | 同一 | 同一 |
+| hook（3 つ） | 同一。入れると動く | 同一。`/hooks` で承認してから動く |
 | Playbook 雛形 | 同一 | 同一 |
 
 両プラグインは同じリポジトリ（`dr-neoueda/researcher-ai-workflow`）から並列配信。研究室で Claude Code 派と Codex CLI 派が混在しても、同じ `office/` メソッドを共有できる。

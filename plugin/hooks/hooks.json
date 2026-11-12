@@ -1,5 +1,4 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
     "SessionStart": [
       {
@@ -7,19 +6,19 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/load-playbooks.sh\"",
-            "description": "raw: 直近 office/secretary/notes と関連 Playbook をコンテキストに自動注入"
+            "timeout": 30
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit",
+        "matcher": "Edit|Write|MultiEdit|apply_patch",
         "hooks": [
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/output-location-check.sh\"",
-            "description": "raw: 成果物配置の二層原則違反（office/<dept>/<旧パス>/ への書き込み）を検出して警告"
+            "timeout": 30
           }
         ]
       }
@@ -30,7 +29,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/learnings-reminder.sh\"",
-            "description": "raw: 今日の活動があるのに learnings.md が無ければ作成を促す"
+            "timeout": 30
           }
         ]
       }

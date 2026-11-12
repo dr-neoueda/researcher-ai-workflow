@@ -2,6 +2,22 @@
 
 本ファイルは [Keep a Changelog](https://keepachangelog.com/) と [Semantic Versioning](https://semver.org/) に準拠。
 
+## [2.2.0 / Codex 2.2.0] - 2026-11-10
+
+### Added — Codex 版に hook を同梱
+
+- Codex 版にも Claude Code 版と同じ 3 つの hook（起動時の読み込み・成果物の置き場所の見張り・学びの催促）を入れた。`hooks/` は両版で同じファイル（check-consistency がバイト一致を見る）
+- Codex では、ユーザーが `/hooks` で信頼するまで hook は動かない。オンボーディングの完了メッセージ・`raw-setup`・Codex 版 README で案内する
+
+### Fixed — hook の文が Claude に届いていなかった
+
+- 置き場所の警告（PostToolUse）と学びの催促（Stop）は、標準出力に書いて終了コード 0 で返していた。Claude Code ではこの形の文は Claude に届かない（デバッグのログに行くだけ）。標準エラー＋終了コード 2 に直した（Codex も同じ形で受け取る）。学びの催促は `stop_hook_active` を見て 1 回だけにした
+- 入力の JSON を jq で読んでいた（jq が無い環境では置き場所の見張りが何もしなかった）。同梱の `_hookio.py`（Python）で読む。Codex の `apply_patch` のパッチから書き込み先を読む
+- プロジェクトの場所を、JSON の `cwd` から上へたどって探す（Codex には `CLAUDE_PROJECT_DIR` が無い。サブフォルダで起動しても見つかる）
+- macOS の bash 3.2 で、日本語の直前の変数（`$today）`）が文字化けしていた
+- レビューの指摘: 日本語の Windows（cp932）でも UTF-8 で読み書きする／Python が無くても `stop_hook_active` を空白の入り方によらず読む／削除のパッチ（Delete File）と Write の本文に書いたパッチの例は警告しない／引用符つきのパスを読む／`office/secretary/` のあるフォルダだけをプロジェクトとみなす（別の「office」を取り違えない）／開発ツールの無い macOS の /usr/bin/python3 を使わない（毎回のインストール画面を出さない）
+- 確かめのレビューの指摘: Codex の `apply_patch` でファイルを移した（Update File の後に Move to）とき、移す前の場所を書き込み先に数えて、正しい場所へ移した直後に誤って警告していた。移した先だけを見る／BOM で始まる入力・NUL を含むパス・リンクの輪（macOS の Python 3.9）で落ちて、同じパッチの他のファイルの警告まで出なくなっていた
+
 ## [2.1.0 / Codex 2.1.0] - 2026-11-10
 
 ### Added — 原稿とスライドの数値の照合

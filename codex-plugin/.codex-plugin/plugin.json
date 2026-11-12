@@ -1,6 +1,6 @@
 {
   "name": "raw",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "理工系の研究プロジェクトのための AI 部署システム（Codex CLI 版）。秘書から始めて、実験・計算・論文・申請書・発表を 9 つの部署で回す。分野ごと（化学・材料／物理・地球惑星／生命科学／工学・情報）の規律と、計算ソフトの Playbook を内蔵。",
   "author": {
     "name": "Shinno Ueda (UEC SPRING)",

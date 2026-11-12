@@ -78,6 +78,7 @@ mirror_dirs=(
   "skills/raw-analyze/references"
   "skills/raw-write/scripts"
   "skills/raw-write/tests"
+  "hooks"
 )
 for d in "${mirror_dirs[@]}"; do
   p="plugin/$d"; c="codex-plugin/$d"
