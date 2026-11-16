@@ -4,6 +4,7 @@ description: >
   論文・申請書・学会要旨などの学術文書を、本人の文体で対話的に執筆・推敲するスキル。
   work/manuscripts/_style/（文体）・work/profile/（研究プロフィール）・work/papers/md/（登録論文＝引用源）を参照し、
   文書種別ごとのテンプレ・字数・言語・引用整合を守って work/manuscripts/ にドラフトを作る。研究側の「書く」担当。
+  原稿・スライドの数の照合（「数を照合して」「数は合ってる？」）も担い、事実の一覧（facts.md）と check_numbers.py で機械的に照合する。
 ---
 
 # raw-write — 論文・申請書ジェネレータ

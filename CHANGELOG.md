@@ -2,6 +2,32 @@
 
 本ファイルは [Keep a Changelog](https://keepachangelog.com/) と [Semantic Versioning](https://semver.org/) に準拠。
 
+## [2.4.1 / Codex 2.4.1] - 2026-11-16
+
+真っさらな Mac（Tart の仮想機・macOS 27.2）で、README どおりに導入からオンボーディング・各機能まで初めて通した動作テストで見つかったものを直した。
+
+### Fixed — 新しい Mac で raw が使える状態まで届かなかった
+
+- `setup/raw-setup.sh` が macOS 標準の bash 3.2（UTF-8）で、最初の確認の前に「unbound variable」で落ちていた（日本語の直前の変数）。`${VAR}` と括り、`check-consistency.sh`（CI）に同じ形を見つける検査を足した
+- Homebrew を入れた直後に PATH を読まず、Node.js・poppler・Claude Code を「brew 未導入」と飛ばしていた。Homebrew の置き場所（`/opt/homebrew`・`/usr/local`）から読み込み、`~/.zprofile` に PATH を足す（すでにあれば足さない）。Homebrew は入っているが PATH に無い Mac でもそれを使う
+- 開発ツールの無い Mac の `/usr/bin/git`・`/usr/bin/python3`（「入れますか」を出すだけの入口）を「導入済み」と表示していた。使えるかで判定し、Python は 3.10 以上を求める（Mac の標準の 3.9 なら Homebrew の Python を入れる）
+- オンボーディングの最後の scaffold が Python 3.9 で落ちていた（`Path.write_text` の `newline` は 3.10 から）。3.9 でも動く書き方にし、テストを `/usr/bin/python3` でも回す
+- 最後の動作確認で版が「== -1 ==」と出ていた（見出しの関数が `head` を乗っ取っていた）／失敗があっても終了コード 0 だった（失敗の数を示して 1 で終える）
+
+### Fixed — 動作テストで見つかった振る舞いの抜け
+
+- 置き場所の見張り（PostToolUse）が、Claude が Bash で書いたファイルを見ていなかった。シェルの道具のあとも走り、直前 2 分に `office/` の旧い置き場所で変わったファイルを警告する（旧い置き場所が無ければ Python を呼ばずに終える。Bash 1 回あたり 0.36 → 0.07 秒）
+- 後から知らされて判定したとき、ジョブ記録と次の投入を書かずに止まっていた。`judge` の出力の最後に次の手（ジョブ記録・Playbook・次の投入。判定できないときは judge し直す）を出す
+- 「照合して」と頼まれても照合の道具を使わず目で比べ、符号の違いを意味で一致にしていた。確かめ方の決まりに 7 番目（数の照合は `check_numbers.py` を通す）を足し、`raw-write` の説明にも書いた
+- 「〜の最高記録は？」のような最新の値・記録の質問で、`raw-ask` の手順（登録済みを先に探す・1 文ごとに URL と「（Paper DB 未登録）」・`work/topics/qa/` に残す）を通らなかった。研究の質問への答え方と `raw-ask` の説明に明記した
+- オンボーディングが `office/secretary/inbox/`・`notes/` を作らず、健康診断（`raw-doctor`）が警告していた。最初から作る
+- Codex 版 README の導入コマンド（`codex plugin install raw`。Codex 0.167 に無い）を `codex plugin add raw@researcher-ai-workflow` に直した
+
+### Known
+
+- `raw-slides` の同梱の部品は Python 3.10 以上が要る（3.9 では import で落ちる）。`raw-setup` が 3.10 以上の Python を入れる
+- Windows では、計算が終わったときの OS の通知が出ない（未実装）
+
 ## [2.4.0 / Codex 2.4.0] - 2026-11-10
 
 ### Added — `raw-ask`：登録済みの論文から答える（無ければ Web で URL つき）

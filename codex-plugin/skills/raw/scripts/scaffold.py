@@ -436,7 +436,9 @@ def _write(target: Path, content: str, written: list[str], *, force: bool, mutab
     target.parent.mkdir(parents=True, exist_ok=True)
     if not content.endswith("\n"):
         content += "\n"
-    target.write_text(content, encoding="utf-8", newline="\n")  # LF on all platforms
+    # LF on all platforms. Path.write_text(newline=) は Python 3.10 から（Mac の標準の 3.9 で落ちる）ので open で書く
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
     written.append(str(target))
 
 
@@ -493,6 +495,10 @@ def scaffold(config: dict[str, Any], skill_dir: Path, out_dir: Path, *, force: b
     for rel_path, body in blocks.items():
         target_rel = safe_relpath(rel_path.replace("YYYY-MM-DD", today))
         emit(resolve_within(office, target_rel), substitute(body, mapping), mutable="todos/" in target_rel)
+
+    # secretary の受け皿（inbox: アイデアのクイックキャプチャ、notes: 決定・学び）。raw-doctor がこの 2 つを見る
+    for sub_dir in ("inbox", "notes"):
+        (office / "secretary" / sub_dir).mkdir(parents=True, exist_ok=True)
 
     # 3. per-tool playbooks (named tools only; mutable — never clobber)
     tools = [normalize_tool(t) for t in config.get("tools", []) if str(t).strip()]

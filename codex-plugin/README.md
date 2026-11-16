@@ -8,7 +8,7 @@ Claude Code 版（`../plugin/`）と内容は基本同一。`office/<dept>/CLAUD
 
 ```bash
 codex plugin marketplace add dr-neoueda/researcher-ai-workflow
-codex plugin install raw
+codex plugin add raw@researcher-ai-workflow
 ```
 
 > **前提**：事前に **git** と **Node.js（LTS）** が必要です（`codex plugin marketplace add` は配布元 GitHub を clone するため git が要ります。macOS は `xcode-select --install`、Windows は「Git for Windows」）。
@@ -106,7 +106,7 @@ Codex は実行するコマンドを sandbox の中で動かし、その中で�
 | プラグインマニフェスト | `.claude-plugin/plugin.json` | `.codex-plugin/plugin.json` |
 | マーケットプレイス manifest | `<repo>/.claude-plugin/marketplace.json` | `<repo>/.agents/plugins/marketplace.json` |
 | 生成される指示ファイル | `<dept>/CLAUDE.md` | `<dept>/AGENTS.md` |
-| インストール | `/plugin install raw@researcher-ai-workflow` | `codex plugin install raw` |
+| インストール | `/plugin install raw@researcher-ai-workflow` | `codex plugin add raw@researcher-ai-workflow` |
 | スキル本体（プロンプト指示） | 同一 | 同一 |
 | hook（起動時・発言時・ファイルを書いたとき・終わる前） | 同一。入れると動く | 同一。`/hooks` で承認してから動く |
 | Playbook 雛形 | 同一 | 同一 |
