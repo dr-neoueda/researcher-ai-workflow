@@ -526,3 +526,16 @@ def test_one_broken_byte_in_a_short_latin_utf8_file_is_still_utf8(tmp_path: Path
     1 バイトの壊れで cp932 に落ちて化けた。cp932 でも損なわずには読めないときは、2 バイトの字も UTF-8 の証拠に数える。"""
     papers, _hits = _one(tmp_path, f"# {title}\n".encode("utf-8") + b"\xff", "x")
     assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8")
+
+
+@pytest.mark.parametrize("data,title", [
+    ("# café résumé naïve Müller Zürich\n".encode() + "é".encode()[:1], "café résumé naïve Müller Zürich"),
+    ("# éaè".encode()[:-1] + b"\n", "éa�"),
+    ("# 結晶\n".encode() + "あ".encode()[:2], "結晶"),
+])
+def test_utf8_cut_off_in_the_middle_of_a_character_stays_utf8(tmp_path: Path, data: bytes, title: str) -> None:
+    """python-reviewer（4 周目）H1: ラテン文字の UTF-8 が字の途中で切れる（最後が 0xC3）と、cp932 でも損なわずに読めるので
+    cp932 に落ち「cafﾃｩ」と化けた。cp932 の読みに不自然な字（私用の字・英字にくっついた半角カナ）が UTF-8 の壊れた字と
+    同じかそれより多ければ UTF-8 とする。"""
+    papers, _hits = _one(tmp_path, data, "x")
+    assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8")

@@ -56,6 +56,7 @@ _DOI_LINK = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.I)  # 書誌の索引
 UTF8_DAMAGE_SHARE = 0.05  # UTF-8 として読めないバイトが、非 ASCII のバイトのこの割合以下なら壊れた UTF-8 とみなす
 UTF8_THREE_BYTES = 0x800  # UTF-8 で 3 バイト以上になる字の始まり（かな・漢字はこれより上）
 CP932_LOSSY = re.compile("[\x80\ue000-\uf8ff]")  # cp932 で読めないバイト（0x80・0xA0・0xFD〜0xFF）と外字が読まれる字
+KANA_GLUED_TO_LATIN = re.compile("[A-Za-z][\uff61-\uff9f]|[\uff61-\uff9f](?=[A-Za-z])")  # 「cafﾃｩ」「ｩr」
 UTF16_NUL_SHARE = 0.3  # NUL のバイトがこの割合を超えたら BOM の無い UTF-16 とみなす
 _LIST_KEYS = ("tags", "authors")  # 2 回出たら（tags と keywords など）文字列でもリストでも合わせる
 _YAML_ESCAPE = re.compile(r"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|x[0-9A-Fa-f]{2}|.)")
@@ -269,25 +270,36 @@ def _utf16(data: bytes, nul_share: float = UTF16_NUL_SHARE) -> str | None:
 
 def _eight_bit(data: bytes) -> tuple[str | None, str]:
     """UTF-8 → 壊れた UTF-8 → cp932 の順に読む。cp932 は何でも読めてしまうので最後。
-    壊れた UTF-8 とみなすのは、置き換えた字が非 ASCII のバイトの 5% 以下か、正しく読めた非 ASCII の字より少ないとき
-    （短い文の 1 バイトの壊れで cp932 に落ちて化けないように）。ただし cp932 で損なわずに読めるときは、3 バイト以上の字
-    （かな・漢字は U+0800 以上）だけを数える: cp932 の半角カナの並び（ﾏｲ = CF B2）は偶然 2 バイトの UTF-8 の字（ϲ）になる。
-    Python の cp932 は 0x80・0xA0・0xFD〜0xFF を私用の字に読んで失敗しないので、私用の字が出たら損なったとみなす。"""
+    壊れた UTF-8 とみなすのは次のどれか（短い文の 1 バイトの壊れで cp932 に落ちて化けないように）:
+    - 置き換えた字が、非 ASCII のバイトの 5% 以下（長い文の少しの壊れ）
+    - cp932 でも読めない（どちらも損なうなら、正しく読めた非 ASCII の字が置き換えた字より多い UTF-8）
+    - cp932 で読めても、その読みに不自然な字（_cp932_oddities）が UTF-8 の置き換えた字と同じかそれより多い、
+      または正しく読めた 3 バイト以上の字（かな・漢字は U+0800 以上）が置き換えた字と同じかそれより多い
+    2 バイトの字そのものは証拠に数えない: cp932 の半角カナの並び（ﾏｲ = CF B2）は偶然 2 バイトの UTF-8 の字（ϲ）になり、
+    逆に UTF-8 の é（C3 A9）は cp932 の半角カナ「ﾃｩ」になる。どちらの読みが自然かで決める。"""
     try:
         return data.decode("utf-8-sig"), ""
     except UnicodeDecodeError:
         pass
-    try:
-        sjis: str | None = data.decode("cp932")
-    except UnicodeDecodeError:
-        sjis = None
     damaged = data.decode("utf-8", errors="replace")
     bad = damaged.count("\ufffd")
-    lowest = UTF8_THREE_BYTES if sjis is not None and not CP932_LOSSY.search(sjis) else 0x80
-    good = sum(1 for ch in damaged if ord(ch) >= lowest and ch != "\ufffd")
-    if bad <= UTF8_DAMAGE_SHARE * sum(1 for b in data if b >= 0x80) or bad <= good:
+    if bad <= UTF8_DAMAGE_SHARE * sum(1 for b in data if b >= 0x80):
         return damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）"
-    return (sjis, "Shift_JIS（cp932）") if sjis is not None else (None, "")
+    try:
+        sjis = data.decode("cp932")
+    except UnicodeDecodeError:
+        good = sum(1 for ch in damaged if ord(ch) >= 0x80 and ch != "\ufffd")
+        return (damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）") if bad <= good else (None, "")
+    wide = sum(1 for ch in damaged if ord(ch) >= UTF8_THREE_BYTES and ch != "\ufffd")
+    if bad <= max(_cp932_oddities(sjis), wide):
+        return damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）"
+    return sjis, "Shift_JIS（cp932）"
+
+
+def _cp932_oddities(text: str) -> int:
+    """cp932 の読みの不自然な字の数: Python の cp932 が読めないバイト（0x80・0xA0・0xFD〜0xFF）を読んだ私用の字と、
+    英字にくっついた半角カナ（UTF-8 の é・ü が「cafﾃｩ」「Mﾃｼller」になったもの。日本語の半角カナは英字の語に混ざらない）。"""
+    return len(CP932_LOSSY.findall(text)) + len(KANA_GLUED_TO_LATIN.findall(text))
 
 
 def _read_text(path: Path) -> tuple[str, str]:

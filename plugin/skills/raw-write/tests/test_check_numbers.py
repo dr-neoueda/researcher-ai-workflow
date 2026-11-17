@@ -1173,7 +1173,19 @@ def test_a_count_or_label_inside_parentheses_does_not_take_the_shared_power(text
 
 @pytest.mark.parametrize("text,expected", [
     ("(5 ± 2) × 10⁻³", ["5e-3", "2e-3"]), ("(1–3) × 10⁻³", ["1e-3", "3e-3"]), ("(1 to 3) × 10⁻³", ["1e-3", "3e-3"]),
-    (r"$(1.2 \pm 1) \times 10^{-3}$", ["1.2e-3", "1e-3"]), ("(2) × 10³", []), ("(1, 2, 3) × 10⁻³", []),
-    ("k = 1.5 (n = 3) × 10⁻³", ["1.5e0"])])
+    (r"$(1.2 \pm 1) \times 10^{-3}$", ["1.2e-3", "1e-3"]),
+    # python-reviewer（4 周目）M2・M3: ± の書き方（+/-・+-）・± の後の符号・数と ± の間の単位も「つながる」に数える。
+    # 語の無い括弧（(2)・(1, 2, 3)・(5 − 2)）は、どの整数にも当てる（5a5dc20 の --integers と同じ）
+    ("(5 +/- 2) × 10^3", ["5e3", "2e3"]), ("(5 +- 2) × 10^3", ["5e3", "2e3"]), ("(5 ± -2) × 10^3", ["5e3", "-2e3"]),
+    ("(5 mg ± 2 mg) × 10^3", ["5e3", "2e3"]), ("(1 and 2) × 10^3", ["1e3", "2e3"]),
+    ("(2) × 10³", ["2e3"]), ("(1, 2, 3) × 10⁻³", ["1e-3", "2e-3", "3e-3"]), ("(5 − 2) × 10^3", ["5e3", "2e3"]),
+    ("(1, 2 and 3) × 10^3", ["1e3", "2e3", "3e3"]),                     # to・and は語に数えない
+    ("(5 mg +/- 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 mg ± -2 mg) × 10^3", ["5e3", "-2e3"])])   # 語のある括弧の ± の書き方
 def test_integers_joined_by_a_plus_minus_or_a_range_take_the_shared_power(text: str, expected: list[str]) -> None:
     assert _values(text) == expected
+    assert _values(text, include_integers=True) == expected
+
+
+def test_a_count_alone_in_parentheses_before_a_power_stays_an_integer() -> None:
+    assert _values("k = 1.5 (n = 3) × 10⁻³") == ["1.5e0"]
+    assert _values("k = 1.5 (n = 3) × 10⁻³", include_integers=True) == ["1.5e0", "3e0"]

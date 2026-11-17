@@ -229,9 +229,9 @@ def _from_dict(data: dict) -> Job:
     clean = {k: v for k, v in data.items() if k in fields}
     for name in ("done", "fail", "outputs"):
         clean[name] = tuple(clean.get(name) or ())
-    try:  # 手で直した記録の null・文字列でも書き込みを落とさない
-        clean["revision"] = int(clean.get("revision") or 0)
-    except (TypeError, ValueError):
+    try:  # 手で直した記録の null・文字列・Infinity・負の数でも、読み込み・書き込みを落とさない
+        clean["revision"] = max(int(clean.get("revision") or 0), 0)
+    except (TypeError, ValueError, OverflowError):
         clean["revision"] = 0
     return Job(**clean)
 
@@ -727,7 +727,8 @@ def _claim(project: Path) -> bool:
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
             return _create_lock(path)
-    except OSError:
+    except OSError as exc:  # 権限・読み取り専用なども、理由を見張りのログに残す（「別の見張りが居る」と区別できるように）
+        _log_line(project, f"見張りの印を取れなかった（{exc}）")
         return False
 
 

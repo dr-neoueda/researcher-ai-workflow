@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1624,3 +1625,23 @@ def test_a_watcher_releasing_its_lock_does_not_remove_the_one_taken_over_meanwhi
     b.join(10)
     assert won["B"] is True
     assert lock.read_text(encoding="utf-8") == str(pids["B"])      # B の印は残っている
+
+
+@pytest.mark.parametrize("value", ["Infinity", "1e400", "-3"])
+def test_a_revision_out_of_range_does_not_stop_reading_the_jobs(project: Path, value: str) -> None:
+    """python-reviewer（4 周目）M1: revision が Infinity だと int() の OverflowError で load_jobs ごと落ちた（他のジョブも見えない）。"""
+    job = _job_with_log(project, " Normal termination of Gaussian 16\n")
+    path = project / jw.WATCH_DIR / f"{job.key}.json"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(re.sub(r'"revision": \d+', f'"revision": {value}', text), encoding="utf-8")
+    assert jw.load_jobs(project)[0].revision == 0
+
+
+def test_a_lock_that_cannot_be_taken_is_written_to_the_watcher_log(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """python-reviewer（4 周目）L2: 印を取れない理由（権限など）を黙って「別の見張りが居る」と同じにしていた。"""
+    def denied(_path: Path) -> bool:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(jw, "_create_lock", denied)
+    assert jw._claim(project) is False
+    assert "Permission denied" in (project / jw.WATCH_DIR / "_watcher.log").read_text(encoding="utf-8")
