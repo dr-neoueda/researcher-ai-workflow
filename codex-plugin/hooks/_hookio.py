@@ -23,7 +23,7 @@ from typing import Any, Iterator
 
 SHELL_TOOLS = ("Bash", "shell", "local_shell", "exec_command")  # シェルの道具（Claude Code・Codex）
 RECENT_SECONDS = 120  # シェルで書いたファイルを拾う窓（秒）。前からある置き違いでは毎回警告しない
-CLOCK_SLACK_SECONDS = 2  # いまより先の時刻を「先の日付のファイル」とみなすまでの余裕（ファイルの時刻の刻み）
+CLOCK_SLACK_SECONDS = 300  # これより先の時刻のファイルは「先の日付」とみなして数えない（時計の進んだ共有ドライブの数分は数える）
 PATCH_HEADER = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 
 
@@ -143,7 +143,7 @@ def _utf8_stdio() -> None:
 
 def _one_line(path: str) -> str:
     """1 行に 1 つのパスで渡すので、名前の中の改行は \\n と書いて見せる（行が途中で切れないように）。"""
-    return path.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    return path.replace("\n", "\\n").replace("\r", "\\r")
 
 
 def main(argv: list[str]) -> int:

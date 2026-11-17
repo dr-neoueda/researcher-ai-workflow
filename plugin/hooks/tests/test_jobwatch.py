@@ -1413,3 +1413,22 @@ def test_judging_a_running_job_does_not_ask_to_record_it(project: Path, capsys: 
     assert "判定は記録しない" in out
     assert "次に投入するもの" not in out and "office/computation/jobs/" not in out
     assert "judge し直す" in out
+
+
+def test_a_dead_lock_that_cannot_be_removed_yet_is_not_an_error(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """LOW: Windows で別のプロセスが読んでいる瞬間の印は消せない（PermissionError）。起動を traceback で落とさず、取れなかったとする。"""
+    watch = project / jw.WATCH_DIR
+    watch.mkdir(parents=True, exist_ok=True)
+    lock = watch / jw.LOCK
+    lock.write_text("999999999", encoding="utf-8")
+    _old(lock)
+    real_unlink = Path.unlink
+
+    def busy(self: Path, missing_ok: bool = False) -> None:
+        if self.name == jw.LOCK:
+            raise PermissionError(32, "being used by another process")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", busy)
+    assert jw._claim(project) is False
+    assert not (watch / jw.TAKEOVER).exists()

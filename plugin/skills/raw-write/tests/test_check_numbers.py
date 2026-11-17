@@ -1020,8 +1020,9 @@ def test_a_thousands_comma_in_a_tsv_cell_is_one_number(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("体積 12mL", ["12e0"]), ("300K で", ["300e0"]), ("2h 加熱", ["2e0"]), ("5mg", ["5e0"]), ("10min", ["10e0"]),
+    ("体積 12mL", ["12e0"]), ("300K で", ["300e0"]), ("5mg", ["5e0"]), ("10min", ["10e0"]), ("2M HCl", ["2e0"]),
     ("B3LYP/6-31G(d) で計算", []), ("13C NMR", []), ("3D 構造", []), ("化合物 1a と 2b", []),
+    ("化合物 3h と 2g", []), ("2m・2s", []),                  # 小文字 1 文字は化合物の番号（時間・質量は「2 h」と空ける）
 ])
 def test_integers_with_a_unit_glued_on_are_read(text: str, expected: list[str]) -> None:
     """Codex #69: --integers でも「12mL」の 12 を識別子として黙って捨て、誤った体積を照合しなかった。"""
@@ -1062,3 +1063,35 @@ def test_the_skills_say_what_to_do_when_a_draft_has_no_numbers(plugin: str, skil
     root = Path(__file__).resolve().parents[4]
     text = (root / plugin / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
     assert "数が 1 つも取れない" in text and "--integers" in text and "照合は要らない" in text
+
+
+# ---------- python-reviewer（v2.4.2 の 1 周目）----------
+
+def test_an_unclosed_quote_in_a_table_keeps_the_line_numbers(tmp_path: Path) -> None:
+    """MEDIUM: 閉じていない「"」が残りの全部の行を 1 つのセルに飲み込み、どの数も L1 と報告していた。"""
+    p = tmp_path / "facts.tsv"
+    p.write_text('a\t"3 mL\t5.5\nb\t7.25\nc\t8.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "5.5"), ("L2", "7.25"), ("L3", "8.5")]
+
+
+@pytest.mark.parametrize("text", ["y = 0,125", "| 0,125 |", "y = 1,25"])
+def test_a_possible_decimal_comma_is_not_read_as_numbers(text: str) -> None:
+    """MEDIUM: 「0,125」を桁区切りとして 125 と読んでいた。0 と 125 に割っても一覧の 125 と偽って一致しうるので、
+    小数点のカンマかもしれない書き方は数として読まない（原稿では（参考）に挙がる）。"""
+    assert _values(text, include_integers=True) == []
+
+
+def test_a_quoted_decimal_comma_in_a_csv_draft_is_reported(tmp_path: Path) -> None:
+    code, out = _check(tmp_path, 'name,value\nx,"0,52"\ny,31.44', "31.44", draft_name="draft.csv")
+    assert code == 0 and "小数点がカンマかもしれない" in out and "0,52" in out
+
+
+def test_a_huge_shared_exponent_after_parentheses_does_not_stop_the_check() -> None:
+    """LOW: 桁外れの共通の指数で int() が ValueError を上げ、原稿全体を「読めません」にしていた。"""
+    nums = cn.extract_numbers("(1.2 ± 0.1) × 10^" + "9" * 5000, location="L1")
+    assert [(str(n.mantissa), n.unreadable) for n in nums] == [("1.2", False), ("0.1", False), ("1", True)]
+
+
+def test_an_inner_exponent_is_not_overridden_or_dropped_by_an_outer_one() -> None:
+    """LOW: 「(1.2×10^3) × 10^2」で外の 10^2 を黙って捨てていた。共有せず、外の 10^2 も数として残す（一覧に無ければ挙がる）。"""
+    assert _values("(1.2×10^3) × 10^2") == ["1.2e3", "1e2"]

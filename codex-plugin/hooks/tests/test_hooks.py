@@ -670,3 +670,23 @@ def test_a_job_submitted_while_stop_was_holding_still_gets_a_watcher(project: Pa
         assert _heartbeat_written(project)                          # が、見張りは起動する
     finally:
         _stop_watcher(project, live, tmp_path)
+
+
+def test_a_file_a_little_in_the_future_on_a_shared_drive_is_still_caught(project: Path) -> None:
+    """LOW: 時計の進んだ共有のドライブ（NFS・同期フォルダ）では、いま書いたファイルの時刻が数秒〜数分先になる。"""
+    sys.path.insert(0, str(HOOKS))
+    import _hookio
+    target = project / "office" / "research" / "papers" / "nfs.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("x\n", encoding="utf-8")
+    behind = time.time() - 60                                   # 手元の時計がサーバより 60 秒遅い（mtime も ctime も 60 秒先に見える）
+    assert _hookio.recent_office_files(project, now=behind, places=["office/research/papers"]) == ["office/research/papers/nfs.md"]
+
+
+def test_a_backslash_in_a_name_is_shown_as_it_is(project: Path) -> None:
+    target = project / "office" / "research" / "papers" / "a\\b.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("x\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "true"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "office/research/papers/a\\b.md → work/papers/a\\b.md" in res.stderr

@@ -121,7 +121,7 @@ _EXPONENT = (
     rf"|\s*[xX]\s*10(?P<xexp>[-−–‐‑]\d+)(?!\d)(?!\s*{_LENGTH_UNIT})"  # 5 x 10-3 M は指数、0.5 x 10-20 mm は寸法
     rf"|{_TIMES_NO_LETTER}10(?P<gexp>(?!0+(?!\d))\d{{1,2}})(?!\d))?"  # 1.2×103: 上付きが失われた指数（読めないとして挙げる）
 )
-_MANTISSA_GROUPED = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![.\d])\.\d+"
+_MANTISSA_GROUPED = r"[1-9]\d{0,2}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![.\d])\.\d+"  # 0,125 は桁区切りでない
 _MANTISSA_PLAIN = r"\d+(?:\.\d+)?|(?<![.\d])\.\d+"
 _NUM_GROUPED = re.compile(rf"(?P<sign>[{SIGN_CHARS}])?(?P<mant>{_MANTISSA_GROUPED})" + _EXPONENT)
 _NUM_PLAIN = re.compile(rf"(?P<sign>[{SIGN_CHARS}])?(?P<mant>{_MANTISSA_PLAIN})" + _EXPONENT)
@@ -129,14 +129,16 @@ _BARE_POWER = re.compile(rf"{_CARET}({_SIGN}?\s*\d+)\s*[}})]?")
 _PAREN_POWER = re.compile(  # (1.2 ± 0.1) × 10⁻³: 括弧の中の数が共通の指数を持つ
     rf"\((?P<inner>[^()]*)\)\s*{_TIMES}\s*(?P<ten>10){_CARET}(?P<pexp>{_SIGN}?\s*\d+)\s*[}})]?"
 )
-_UNIT_AFTER = re.compile(  # 整数の直後に付いた単位（12mL・300K・2h）。付いていない英字（31G・3D・13C・1a）は識別子
-    r"(?:[kmµμunpfMGT]?(?:mol|cal|Hz|Pa|eV|Da|bar|L|g|M|m|s|J|W|V|K)|min|h|wt|ppm|ppb|rpm|atm|Torr)(?![A-Za-z])"
+_UNIT_AFTER = re.compile(  # 整数の直後に付いた単位（12mL・300K・5mg）。それ以外の英字（31G・3D・13C・1a）は識別子。
+    # 小文字 1 文字の単位（2h・2g・2m・2s）は化合物の番号と同じ形なので単位としない（時間・質量は「2 h」と空けて書く）
+    r"(?:[kmµμunpfMGT](?:mol|cal|Hz|Pa|eV|Da|bar|L|g|M|m|s|J|W|V|K)|mol|cal|Hz|Pa|eV|Da|bar|L|M|J|W|V|K"
+    r"|min|wt|ppm|ppb|rpm|atm|Torr)(?![A-Za-z])"
 )
 _LETTERS = re.compile(r"[A-Za-z]*")
 INTEGER_ID = "英字が続く整数（識別子とみなした）"
 PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
-_DECIMAL_COMMA = re.compile(r"(?<![\d,.])\d+,\d{1,2}(?![\d,])")
+_DECIMAL_COMMA = re.compile(r"(?<![\d,.])(?:\d+,\d{1,2}|0,\d+)(?![\d,])")  # 0,52・1,25・0,125: 小数点のカンマかもしれない
 _MINUS_LIKE = str.maketrans("−–‐‑", "----")
 MAX_EXPONENT_DIGITS = 6
 _MINUS_SPELLINGS = (
@@ -428,9 +430,14 @@ def _consume_powers(matches: list[re.Match[str]], read: list[tuple[Number | None
 def _share_paren_powers(matches: list[re.Match[str]], read: list[tuple[Number | None, str]], line: str) -> None:
     """「(1.2 ± 0.1) × 10⁻³」の括弧の中の数に指数を当て、括弧の後の「10⁻³」は数として読まない。"""
     for group in _PAREN_POWER.finditer(line):
-        exponent = int(re.sub(r"\s+", "", group.group("pexp")).translate(_MINUS_LIKE))
-        if abs(exponent) > MAX_EXPONENT:
+        digits = re.sub(r"\s+", "", group.group("pexp")).translate(_MINUS_LIKE)
+        if len(digits.lstrip("+-")) > MAX_EXPONENT_DIGITS or abs(int(digits)) > MAX_EXPONENT:
             continue
+        exponent = int(digits)
+        inside = [number for match, (number, _r) in zip(matches, read)
+                  if number is not None and group.start("inner") <= match.start() < group.end("inner")]
+        if any(number.exponent != 0 or number.unreadable for number in inside):
+            continue  # 「(1.2×10^3) × 10^2」は共有しない（外の 10^2 も数として残し、一覧に無ければ挙がる）
         for i, (match, (number, reason)) in enumerate(zip(matches, read)):
             if match.start() == group.start("ten"):
                 read[i] = (None, "")
@@ -452,6 +459,9 @@ def extract_numbers(
     ``skipped`` を渡すと、小数に見えるのに読まなかったもの（図表の番号・版番号・識別子など）をそこに足す。
     """
     line = _strip_noise(normalize(text))
+    # 小数点のカンマかもしれない書き方は数として読まない（0 と 125 に割って一覧の 125 と偽って一致させない）。
+    # 原稿では decimal_comma_spots が（参考）として挙げる
+    line = _DECIMAL_COMMA.sub(lambda m: " " * len(m.group(0)), line)
     pattern = _NUM_GROUPED if thousands else _NUM_PLAIN
     matches = list(pattern.finditer(line))
     read = [_read_one(m, line, location, include_integers) for m in matches]
@@ -591,11 +601,15 @@ def _table_lines(path: Path) -> list[tuple[str, str]]:
     """CSV・TSV をセルに分け、「 | 」でつないだ行にする（引用符の中の「1,234.5」は 1 つのセルのまま。
     セルの区切りが消えるので、セルの中のカンマは桁区切りとして読める）。場所は行の始まりの行番号。"""
     text = path.read_text(encoding="utf-8-sig")
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter="," if path.suffix.lower() == ".csv" else "\t")
+    delimiter = "," if path.suffix.lower() == ".csv" else "\t"
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
     out, start = [], 1
-    for row in reader:
-        out.append((f"L{start}", " | ".join(row)))
-        start = reader.line_num + 1
+    try:
+        for row in reader:
+            out.append((f"L{start}", " | ".join(row)))
+            start = reader.line_num + 1
+    except csv.Error:  # 閉じていない引用符など: 残りの行を飲み込ませず、1 行ずつ区切りで分ける
+        out = [(f"L{i}", " | ".join(line.split(delimiter))) for i, line in enumerate(text.splitlines(), start=1)]
     return out
 
 
@@ -802,9 +816,7 @@ def read_numbers(path: Path, include_integers: bool = False, skipped: list[Skipp
 
 
 def decimal_comma_spots(path: Path) -> list[str]:
-    """小数点をカンマで書いたかもしれない箇所（例「L3 0,52」）。CSV は対象外。"""
-    if path.suffix.lower() in TABLE_SUFFIXES:
-        return []
+    """小数点をカンマで書いたかもしれない箇所（例「L3 0,52」）。CSV・TSV はセルの中だけを見る（セルの区切りは数えない）。"""
     spots = []
     for loc, line in read_lines(path):
         spots.extend(f"{loc} {m.group(0)}" for m in _DECIMAL_COMMA.finditer(_strip_noise(normalize(line))))

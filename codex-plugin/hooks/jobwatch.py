@@ -739,8 +739,12 @@ def _remove_dead_lock(project: Path, path: Path) -> bool:
     try:
         if _lock_held(project, path):  # 見ていた間に別の見張りが引き継いだ
             return False
-        with contextlib.suppress(FileNotFoundError):
+        try:
             path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:  # Windows で別のプロセスが読んでいる瞬間など。今回は取れなかったとする
+            return False
         return True
     finally:
         with contextlib.suppress(OSError):

@@ -485,3 +485,27 @@ def test_a_word_only_in_a_section_heading_is_searchable(tmp_path: Path) -> None:
     """Codex #72: 節の見出し（## Zeolite synthesis）が索引に入らず、見出しにだけある対象名で探せなかった。"""
     _papers, hits = _one(tmp_path, b"# Example\n\n## Zeolite synthesis\nYield: 85 %\n", "zeolite")
     assert hits and hits[0].section == "Zeolite synthesis"
+
+
+# ---------- python-reviewer（v2.4.2 の 1 周目）----------
+
+def test_an_escape_beyond_unicode_does_not_stop_the_search(tmp_path: Path) -> None:
+    """HIGH: \\U の 8 桁が Unicode の外（0x110000 以上）だと chr() が ValueError を上げ、1 本のために検索全体が落ちた。"""
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "bad.md").write_text('---\ntitle: "C:\\UDEADBEEF zeolite"\n---\n# x\n', encoding="utf-8")
+    (lib / "good.md").write_text("# good zeolite\n", encoding="utf-8")
+    papers = sl.load_library(lib)
+    assert {h.paper.path.stem for h in sl.search(papers, ["zeolite"])} == {"bad", "good"}
+    assert next(p for p in papers if p.path.stem == "bad").title == "C:\\UDEADBEEF zeolite"
+
+
+@pytest.mark.parametrize("heading,query", [("## Summary", "summary"), ("## 主要な結果（数値・数式・図表要点すべて）", "数式"),
+                                           ("## 手法（詳細）", "詳細"), ("## Results", "results")])
+def test_template_section_headings_are_not_indexed(tmp_path: Path, heading: str, query: str) -> None:
+    """MEDIUM: 要約の決まった見出し（Summary・主要な結果…）を索引に入れると、その語の問いが全部の論文に当たる。"""
+    lib = tmp_path / "md"
+    lib.mkdir()
+    for name in ("a", "b"):
+        (lib / f"{name}.md").write_text(f"# Paper {name}\n\n{heading}\nnothing here\n", encoding="utf-8")
+    assert sl.search(sl.load_library(lib), [query]) == []

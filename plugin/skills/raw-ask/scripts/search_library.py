@@ -60,6 +60,15 @@ _YAML_ESCAPE = re.compile(r"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|x[0-9A-Fa-f]{2}|.
 _YAML_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", " ": " ", "0": "\x00",
                 "_": "\u00a0", "N": "\u0085", "L": "\u2028", "P": "\u2029"}
 DEFAULT_SECTION = "本文"  # 最初の「## 」より前の文の節の名前（見出しではないので索引に入れない）
+TEMPLATE_HEADINGS = frozenset({  # どの要約にもある決まった見出し（索引に入れるとその語の問いが全部の論文に当たる）
+    *SUMMARY_SECTIONS, *METADATA_SECTIONS, DEFAULT_SECTION,
+    "introduction", "background", "method", "methods", "methodology", "materials and methods", "experimental",
+    "results", "results and discussion", "discussion", "conclusion", "conclusions", "references", "limitations",
+    "related work", "next actions",
+    "背景", "背景・動機", "対象物質・系", "手法", "方法", "実験", "結果", "主要な結果", "考察", "考察・著者の主張", "結論",
+    "関連研究との比較", "本研究の限界", "引用文脈テンプレート", "ネクストアクション", "参考文献",
+})
+_TRAILING_NOTE = re.compile(r"\s*[(（][^()（）]*[)）]\s*$")  # 「手法（詳細）」「主要な結果（数値・…）」の括弧書き
 
 
 @dataclass(frozen=True)
@@ -129,7 +138,8 @@ def _yaml_unescape(text: str) -> str:
     def one(match: re.Match[str]) -> str:
         code = match.group(1)
         if code[0] in "uUx" and len(code) > 1:
-            return chr(int(code[1:], 16))
+            point = int(code[1:], 16)
+            return chr(point) if point <= sys.maxunicode else "\\" + code  # Unicode の外（\\UDEADBEEF）は解かずに残す
         return _YAML_SIMPLE.get(code, "\\" + code)
 
     out = _YAML_ESCAPE.sub(one, text)
@@ -337,6 +347,10 @@ class _Index:
     avg_length: float
 
 
+def _is_template_heading(name: str) -> bool:
+    return _TRAILING_NOTE.sub("", unicodedata.normalize("NFKC", name)).strip().lower() in TEMPLATE_HEADINGS
+
+
 def _build_index(papers: list[Paper]) -> _Index:
     chunks = []
     for i, paper in enumerate(papers):
@@ -351,7 +365,7 @@ def _build_index(papers: list[Paper]) -> _Index:
             chunks.append(_Chunk(i, "書誌", biblio, Counter(tokens), len(tokens), 1.0))
         for section in paper.sections:
             weight = SUMMARY_WEIGHT if section.name.lower() in SUMMARY_SECTIONS else 1.0
-            named = section.text if section.name == DEFAULT_SECTION else f"{section.name}\n{section.text}"
+            named = section.text if _is_template_heading(section.name) else f"{section.name}\n{section.text}"
             tokens = _index_tokens(named)  # 見出しにだけある語（## Zeolite synthesis）でも探せるように
             chunks.append(_Chunk(i, section.name, section.text, Counter(tokens), len(tokens), weight))
     postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
