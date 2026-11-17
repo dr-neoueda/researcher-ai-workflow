@@ -727,8 +727,9 @@ def _claim(project: Path) -> bool:
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
             return _create_lock(path)
-    except OSError as exc:  # 権限・読み取り専用なども、理由を見張りのログに残す（「別の見張りが居る」と区別できるように）
-        _log_line(project, f"見張りの印を取れなかった（{exc}）")
+    except OSError as exc:  # 権限・読み取り専用なども、理由を残す（「別の見張りが居る」と区別できるように）
+        _log_line(project, f"見張りの印を取れなかった（{exc}）")  # フォルダが書けないとログも書けないので、標準エラーにも
+        print(f"[raw jobwatch] 見張りの印を取れなかった（{exc}）", file=sys.stderr)
         return False
 
 

@@ -135,14 +135,13 @@ _UNIT_AFTER = re.compile(  # 整数の直後に付いた単位（12mL・300K・5
     r"|min|wt|ppm|ppb|rpm|atm|Torr)(?![A-Za-z])"
 )
 _LETTERS = re.compile(r"[A-Za-z]*")
-# 括弧の共通の指数を当てる整数。語の無い括弧（(2)・(1, 2, 3)・(5 − 2)）なら全部。語のある括弧では、± や範囲で隣の数と
-# つながっているものだけ（(5 ± 2)・(5 mg ± 2 mg)・(1–3)・(1 to 3)）。「n = 3」「5 mg,」「3 runs」のような件数・ラベルには
-# 当てない（3×10⁻³ という無い数を作らない）
+# 括弧の共通の指数を当てる整数: ± や範囲で隣の数とつながっているものだけ（(5 ± 2)・(5 mg ± 2 mg)・(1–3)・(5 mg to 6 mg)）。
+# 数と ± や範囲の間の単位は許す。つながらない整数（1.2345(6) × 10³ の標準不確かさ・「n = 3」「試料 3 回」の件数・
+# (2023) のような番号）には当てない（6×10³ という無い数を作らない）。「and」は件数もつなぐ（12 mg and 3 runs）のでつなぎにしない
 _PLUS_MINUS = r"(?:[±∓]|\\pm|\\mp|\+\s*/?\s*-)"  # ±・\pm・+/-・+-
-_JOINED_BEFORE = re.compile(rf"(?:{_PLUS_MINUS}|\d\s*[-–—~〜−]|\d\s+(?:to|and))\s*[-+−–]?\s*$")
-_JOINED_AFTER = re.compile(rf"\s*(?:[A-Za-zµμ°%]+\s*)?(?:{_PLUS_MINUS}|[-–—~〜−]\s*\d|(?:to|and)\s+\d)")
-_WORDS = re.compile(r"[A-Za-z]")
-_NOT_WORDS = re.compile(r"\\(?:pm|mp)\b|\b(?:to|and)\b")  # ± の TeX と「to」「and」は語に数えない
+_UNIT_WORD = r"(?:[A-Za-zµμ°%Å]+\s*)?"
+_JOINED_BEFORE = re.compile(rf"(?:{_PLUS_MINUS}|\d\s*{_UNIT_WORD}(?:[-–—~〜−]|to\b))\s*[-+−–]?\s*$")
+_JOINED_AFTER = re.compile(rf"\s*{_UNIT_WORD}(?:{_PLUS_MINUS}|[-–—~〜−]\s*\d|to\s+\d)")
 INTEGER_ID = "英字が続く整数（識別子とみなした）"
 PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
@@ -450,7 +449,6 @@ def _share_paren_powers(matches: list[re.Match[str]], read: list[tuple[Number | 
         if len(digits.lstrip("+-")) > MAX_EXPONENT_DIGITS or abs(int(digits)) > MAX_EXPONENT:
             continue
         exponent = int(digits)
-        has_words = bool(_WORDS.search(_NOT_WORDS.sub(" ", group.group("inner"))))
         inside = [number for match, (number, _r) in zip(matches, read)
                   if number is not None and group.start("inner") <= match.start() < group.end("inner")]
         if any(number.exponent != 0 or number.unreadable for number in inside):
@@ -460,10 +458,10 @@ def _share_paren_powers(matches: list[re.Match[str]], read: list[tuple[Number | 
                 read[i] = (None, "")
             elif number is not None and not number.unreadable and number.exponent == 0 \
                     and group.start("inner") <= match.start() < group.end("inner"):
-                if has_words and _is_bare_integer(number, match, line) and not (
+                if _is_bare_integer(number, match, line) and not (
                         _JOINED_BEFORE.search(line, group.start("inner"), match.start("mant"))
                         or _JOINED_AFTER.match(line, match.end("mant"))):
-                    continue  # 件数・ラベルの整数は整数のまま（--integers の無いときは外れる）
+                    continue  # つながらない整数は整数のまま（--integers の無いときは外れる）
                 text = f"{_fmt(number.mantissa)}×10^{exponent}"
                 read[i] = (dataclasses.replace(number, exponent=exponent, text=text), reason)
 

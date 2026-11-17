@@ -1645,3 +1645,17 @@ def test_a_lock_that_cannot_be_taken_is_written_to_the_watcher_log(project: Path
     monkeypatch.setattr(jw, "_create_lock", denied)
     assert jw._claim(project) is False
     assert "Permission denied" in (project / jw.WATCH_DIR / "_watcher.log").read_text(encoding="utf-8")
+
+
+
+def test_a_lock_that_cannot_be_taken_in_a_read_only_folder_says_why_on_stderr(
+        project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """python-reviewer（5 周目）L4: 見張りのフォルダが書けないと、理由を書くはずのログも書けず、どこにも残らなかった。"""
+    watch = project / jw.WATCH_DIR
+    watch.mkdir(parents=True, exist_ok=True)
+    watch.chmod(0o555)
+    try:
+        assert jw._claim(project) is False
+    finally:
+        watch.chmod(0o755)
+    assert "見張りの印を取れなかった" in capsys.readouterr().err

@@ -55,8 +55,10 @@ _META_KEYS = {
 _DOI_LINK = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.I)  # 書誌の索引に https・doi・org を入れない
 UTF8_DAMAGE_SHARE = 0.05  # UTF-8 として読めないバイトが、非 ASCII のバイトのこの割合以下なら壊れた UTF-8 とみなす
 UTF8_THREE_BYTES = 0x800  # UTF-8 で 3 バイト以上になる字の始まり（かな・漢字はこれより上）
-CP932_LOSSY = re.compile("[\x80\ue000-\uf8ff]")  # cp932 で読めないバイト（0x80・0xA0・0xFD〜0xFF）と外字が読まれる字
-KANA_GLUED_TO_LATIN = re.compile("[A-Za-z][\uff61-\uff9f]|[\uff61-\uff9f](?=[A-Za-z])")  # 「cafﾃｩ」「ｩr」
+CP932_LOSSY = re.compile("[\x80\uf8f0-\uf8f3]")  # Python の cp932 が読めないバイト（0x80・0xA0・0xFD〜0xFF）の代わりに出す字（外字は含めない）
+# UTF-8 の 2 バイトの字（é = C3 A9）を cp932 で読んだ形: 先頭のバイト（C2〜DF）のカナ＋続きのバイト（A1〜BF）のカナが、英字にくっつく
+# （「cafﾃｩ」「Mﾃｼller」）。日本語の半角カナの語（ﾃﾞｰﾀ・ﾒﾓ）は、この並びで英字にくっつくことがまれ
+UTF8_AS_KANA = re.compile("(?<=[A-Za-z])[\uff82-\uff9f][\uff61-\uff7f]|[\uff82-\uff9f][\uff61-\uff7f](?=[A-Za-z])")
 UTF16_NUL_SHARE = 0.3  # NUL のバイトがこの割合を超えたら BOM の無い UTF-16 とみなす
 _LIST_KEYS = ("tags", "authors")  # 2 回出たら（tags と keywords など）文字列でもリストでも合わせる
 _YAML_ESCAPE = re.compile(r"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|x[0-9A-Fa-f]{2}|.)")
@@ -273,7 +275,7 @@ def _eight_bit(data: bytes) -> tuple[str | None, str]:
     壊れた UTF-8 とみなすのは次のどれか（短い文の 1 バイトの壊れで cp932 に落ちて化けないように）:
     - 置き換えた字が、非 ASCII のバイトの 5% 以下（長い文の少しの壊れ）
     - cp932 でも読めない（どちらも損なうなら、正しく読めた非 ASCII の字が置き換えた字より多い UTF-8）
-    - cp932 で読めても、その読みに不自然な字（_cp932_oddities）が UTF-8 の置き換えた字と同じかそれより多い、
+    - cp932 で読めても、その読みの不自然な字（_cp932_oddities）が UTF-8 の置き換えた字と同じかそれより多い、
       または正しく読めた 3 バイト以上の字（かな・漢字は U+0800 以上）が置き換えた字と同じかそれより多い
     2 バイトの字そのものは証拠に数えない: cp932 の半角カナの並び（ﾏｲ = CF B2）は偶然 2 バイトの UTF-8 の字（ϲ）になり、
     逆に UTF-8 の é（C3 A9）は cp932 の半角カナ「ﾃｩ」になる。どちらの読みが自然かで決める。"""
@@ -297,9 +299,9 @@ def _eight_bit(data: bytes) -> tuple[str | None, str]:
 
 
 def _cp932_oddities(text: str) -> int:
-    """cp932 の読みの不自然な字の数: Python の cp932 が読めないバイト（0x80・0xA0・0xFD〜0xFF）を読んだ私用の字と、
-    英字にくっついた半角カナ（UTF-8 の é・ü が「cafﾃｩ」「Mﾃｼller」になったもの。日本語の半角カナは英字の語に混ざらない）。"""
-    return len(CP932_LOSSY.findall(text)) + len(KANA_GLUED_TO_LATIN.findall(text))
+    """cp932 の読みの不自然な字の数: Python の cp932 が読めないバイトの代わりに出す字と、UTF-8 の é・ü が化けた形の
+    半角カナの対が英字にくっついたもの（UTF8_AS_KANA）。外字や、英字に挟まれた日本語の半角カナの語は数えない。"""
+    return len(CP932_LOSSY.findall(text)) + len(UTF8_AS_KANA.findall(text))
 
 
 def _read_text(path: Path) -> tuple[str, str]:

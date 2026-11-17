@@ -539,3 +539,15 @@ def test_utf8_cut_off_in_the_middle_of_a_character_stays_utf8(tmp_path: Path, da
     同じかそれより多ければ UTF-8 とする。"""
     papers, _hits = _one(tmp_path, data, "x")
     assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8")
+
+
+
+@pytest.mark.parametrize("text", ["# \ue000\ue001 data\n", "ID: \ue000\ue001\ue002\ue003\n", "# PCﾃﾞｰﾀPC\n", "# XRDﾌｧｲﾙXRD\n",
+                                  "# Aｲ\n", "# PCﾒﾓPC\n"])
+def test_short_shift_jis_with_gaiji_or_kana_between_latin_letters_stays_shift_jis(tmp_path: Path, text: str) -> None:
+    """python-reviewer（5 周目）M4・L1: 外字（私用の字に読む cp932 の正しい字）や、英字に挟まれた半角カナの語を
+    「不自然な字」と数え、短い Shift_JIS を壊れた UTF-8 にしていた。不自然な字は、読めないバイトの代わりの字と、
+    UTF-8 の é・ü が化けた形（先頭のバイトのカナ＋続きのバイトのカナ）が英字にくっついたものだけにする。"""
+    path = tmp_path / "paper.md"
+    path.write_bytes(text.encode("cp932"))
+    assert sl._read_text(path) == (text, "Shift_JIS（cp932）")
