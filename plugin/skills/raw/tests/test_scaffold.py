@@ -480,11 +480,11 @@ def test_measurement_record_template_is_placed_for_the_experiment_dept(tmp_path,
 
 
 @pytest.mark.parametrize("skill,root", [(SKILL_DIR, "CLAUDE.md"), (CODEX_SKILL, "AGENTS.md")])
-def test_root_rules_carry_the_six_verification_rules(tmp_path, config, skill, root):
+def test_root_rules_carry_the_seven_verification_rules(tmp_path, config, skill, root):
     scaffold.scaffold(config, skill, tmp_path)
     body = (tmp_path / "office" / root).read_text(encoding="utf-8")
     section = body.split("### 確かめ方の決まり", 1)[1].split("\n## ", 1)[0].split("\n### ", 1)[0]
-    assert re.findall(r"^(\d)\. \*\*", section, flags=re.M) == ["1", "2", "3", "4", "5", "6"]
+    assert re.findall(r"^(\d)\. \*\*", section, flags=re.M) == ["1", "2", "3", "4", "5", "6", "7"]  # 7 は v2.4.1（数の照合）
 
 
 def test_experiment_dept_points_measurement_data_to_the_sample_folders(tmp_path, config):
@@ -520,3 +520,71 @@ def test_root_rules_send_research_questions_to_the_library_first(tmp_path, confi
     section = body.split("### 研究の質問への答え方", 1)[1].split("\n### ", 1)[0]
     for word in ("raw-ask", "work/papers/md", "URL", "Paper DB 未登録"):
         assert word in section, word
+
+
+# --- v2.4.1: 真っさらな Mac の動作テストで見つかったこと -----------------------
+
+SYSTEM_PYTHON = Path("/usr/bin/python3")  # macOS の開発ツールの Python（3.9）＝ Homebrew を入れていない Mac の python3
+
+
+def _system_python_is_old() -> bool:
+    if not SYSTEM_PYTHON.exists():
+        return False
+    import subprocess
+    res = subprocess.run([str(SYSTEM_PYTHON), "-c", "import sys; print(sys.version_info >= (3, 10))"],
+                         capture_output=True, text=True, timeout=30)
+    return res.returncode == 0 and res.stdout.strip() == "False"
+
+
+@pytest.mark.skipif(not _system_python_is_old(), reason="Python 3.9 の /usr/bin/python3 が無い")
+def test_scaffold_runs_on_the_python_a_fresh_mac_has(tmp_path, config):
+    """F6: Mac に最初からある Python 3.9 で、オンボーディングの最後の scaffold が落ちない。"""
+    import subprocess
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "proj"
+    res = subprocess.run(
+        [str(SYSTEM_PYTHON), str(SKILL_DIR / "scripts" / "scaffold.py"), "--config", str(cfg),
+         "--skill", str(SKILL_DIR), "--out", str(out)],
+        capture_output=True, text=True, timeout=120, env={"PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "scaffold complete" in res.stdout and (out / "office" / "CLAUDE.md").exists()
+
+
+def test_written_files_use_lf_line_endings(tmp_path, config):
+    scaffold.scaffold(config, SKILL_DIR, tmp_path)
+    assert b"\r\n" not in (tmp_path / "office" / "CLAUDE.md").read_bytes()
+
+
+def test_secretary_inbox_and_notes_are_created(tmp_path, config):
+    """F11: 健康診断（raw-doctor）が求める secretary の inbox/ と notes/ を最初から作る。"""
+    scaffold.scaffold(config, SKILL_DIR, tmp_path)
+    for name in ("inbox", "notes", "todos"):
+        assert (tmp_path / "office" / "secretary" / name).is_dir(), name
+
+
+@pytest.mark.parametrize("skill,root", [(SKILL_DIR, "CLAUDE.md"), (CODEX_SKILL, "AGENTS.md")])
+def test_root_rules_send_number_checks_to_the_checker(tmp_path, config, skill, root):
+    """F8: 「照合して」と頼まれても照合の道具を使わず、目で比べて符号の違いを意味で一致にした。"""
+    scaffold.scaffold(config, skill, tmp_path)
+    body = (tmp_path / "office" / root).read_text(encoding="utf-8")
+    section = body.split("### 確かめ方の決まり", 1)[1].split("\n### ", 1)[0]
+    assert "check_numbers.py" in section and "facts.md" in section
+
+
+@pytest.mark.parametrize("skill,root", [(SKILL_DIR, "CLAUDE.md"), (CODEX_SKILL, "AGENTS.md")])
+def test_root_rules_treat_latest_records_as_research_questions(tmp_path, config, skill, root):
+    """F10: 「〜の最高記録は？」で登録済みを探さず Web だけで答え、文ごとの出どころと記録が抜けた。"""
+    scaffold.scaffold(config, skill, tmp_path)
+    body = (tmp_path / "office" / root).read_text(encoding="utf-8")
+    section = body.split("### 研究の質問への答え方", 1)[1].split("\n### ", 1)[0]
+    assert "最新" in section and "記録" in section and "1 文ごと" in section
+
+
+@pytest.mark.parametrize("skill_name,words", [("raw-ask", ("最新", "最高記録")), ("raw-write", ("照合", "facts.md"))])
+def test_skill_descriptions_name_the_requests_that_were_missed(skill_name, words):
+    for plugin_dir in (SKILL_DIR.parent, CODEX_SKILL.parent):
+        head = (plugin_dir / skill_name / "SKILL.md").read_text(encoding="utf-8").split("\n---", 1)[0]
+        for word in words:
+            assert word in head, (plugin_dir, skill_name, word)

@@ -924,11 +924,20 @@ def _cmd_register(project: Path, a: argparse.Namespace) -> int:
     return 0
 
 
+NEXT_AFTER_VERDICT = (
+    "次: ① ジョブ記録（office/computation/jobs/）に判定と根拠の行を書く "
+    "② 学びがあれば Playbook（office/computation/playbooks/）に足す "
+    "③ 同じ返事で次に投入するものを決める（無ければ「無い」と書く）"
+)
+NEXT_WHEN_UNDECIDED = "次: 上の理由を解いてから judge し直す（判定できないまま記録しない）"
+
+
 def _cmd_judge(project: Path, key: str) -> int:
     verdict = judge(project, key)
     print(f"判定: {verdict.status}（{key}）")
     for line in verdict.evidence:
         print(f"  {line}")
+    print(NEXT_WHEN_UNDECIDED if verdict.status == "判定できない" else NEXT_AFTER_VERDICT)
     return 0 if verdict.status == "完走" else 1
 
 

@@ -8,7 +8,8 @@
 
 プロジェクトの場所は CLAUDE_PROJECT_DIR（Claude Code）→ 入力の cwd（両方）→ いまの場所 の順に、上へたどって
 raw の office/（中に secretary/ がある）を探す。書き換えたファイルは、Claude Code の tool_input.file_path と、Codex の apply_patch のパッチの
-「*** Add/Update/Delete File:」「*** Move to:」の行から読む。
+「*** Add/Update/Delete File:」「*** Move to:」の行から読む。シェルの道具（Claude Code の Bash など）で書いたものは
+道具の入力から書き込み先が分からないので、直前の RECENT_SECONDS 秒に office/ の中で変わったファイルとして拾う。
 """
 from __future__ import annotations
 
@@ -16,9 +17,12 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
+SHELL_TOOLS = ("Bash", "shell", "local_shell", "exec_command")  # シェルの道具（Claude Code・Codex）
+RECENT_SECONDS = 120  # シェルで書いたファイルを拾う窓（秒）。前からある置き違いでは毎回警告しない
 PATCH_HEADER = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 
 
@@ -67,8 +71,34 @@ def _patch_targets(text: str) -> list[str]:
     return targets
 
 
+def recent_office_files(root: Path, now: float | None = None, places: list[str] | None = None) -> list[str]:
+    """office/ の中（places があればその旧い置き場所だけ）で、直前 RECENT_SECONDS 秒に置かれたファイル。
+    mv・cp -p は更新時刻を古いまま保つので、状態の変更時刻（ctime。移したときに変わる）も見る。ctime は chmod・
+    拡張属性・同期ソフトでも変わるので、旧い置き場所に前からあるファイルを 120 秒の間くり返し警告することがある
+    （置き違いには違いないので許す）。Windows の st_ctime は作成時刻（コピーは拾い、属性の変更は拾わない）。
+    道具の入力から書き込み先が分からないときの拾い方なので、取りこぼしはありうる（長いコマンドの初めに書いたもの等）。"""
+    bases = [root / place for place in places] if places is not None else [root / "office"]
+    cutoff = (time.time() if now is None else now) - RECENT_SECONDS
+    found: set[str] = set()
+    for base in bases:
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            try:
+                info = path.stat()
+                if path.is_file() and max(info.st_mtime, info.st_ctime) >= cutoff:
+                    found.add(path.relative_to(root).as_posix())
+            except (OSError, ValueError):
+                continue
+    return sorted(found)
+
+
 def edited_paths(data: dict[str, Any], root: Path) -> list[str]:
     """書き換えたファイルの、プロジェクトからの相対パス（プロジェクトの外は除く）。"""
+    if data.get("tool_name") in SHELL_TOOLS:
+        listed = os.environ.get("RAW_LEGACY_PLACES")  # 渡されたら（空でも）その場所だけ。渡されなければ office/ 全体
+        places = None if listed is None else [line.strip() for line in listed.splitlines() if line.strip()]
+        return recent_office_files(root, places=places)
     tool_input = data.get("tool_input")
     raw: list[str] = []
     if isinstance(tool_input, dict) and isinstance(tool_input.get("file_path"), str):

@@ -1257,3 +1257,30 @@ def test_a_lock_with_a_non_ascii_digit_is_not_a_pid(project: Path) -> None:
     lock.write_text("²", encoding="utf-8")
     _old(lock)
     assert jw._lock_held(project, lock) is False
+
+
+# ---------- v2.4.1: 真っさらな Mac の動作テストで見つかったこと ----------
+
+def _registered(project: Path, capsys: pytest.CaptureFixture[str], log_text: str | None) -> str:
+    log = project / "work" / "gaussian" / "b.log"
+    if log_text is not None:
+        log.write_text(log_text, encoding="utf-8")
+    jw.main(["register", "--project", str(project), "--name", "b", "--kind", "local", "--id", "1",
+             "--tool", "gaussian", "--log", "work/gaussian/b.log"])
+    return capsys.readouterr().out.strip().splitlines()[-1].split()[-1]
+
+
+@pytest.mark.parametrize("log_text", [" Normal termination of Gaussian 16\n", " Error termination via Lnk1e\n"])
+def test_judge_says_what_to_do_next(project: Path, capsys: pytest.CaptureFixture[str], log_text: str) -> None:
+    """F9: 後から知らされて判定したとき、ジョブ記録と次の投入を書かずに止まった。判定の出力で次の手を示す。"""
+    key = _registered(project, capsys, log_text)
+    jw.main(["judge", "--project", str(project), key])
+    out = capsys.readouterr().out
+    assert "office/computation/jobs/" in out and "次に投入するもの" in out
+
+
+def test_an_undecidable_judge_asks_to_retry_not_to_record(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    key = _registered(project, capsys, None)                 # ログがまだ無い
+    jw.main(["judge", "--project", str(project), key])
+    out = capsys.readouterr().out
+    assert "判定できない" in out and "judge し直す" in out and "次に投入するもの" not in out

@@ -9,6 +9,7 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 hook_read_input() {
     HOOK_INPUT="$(cat)"
+    HOOK_PY="$(hook_python)"   # 使える python は 1 回だけ探し、以後の hook_io で使い回す（hook は道具のたびに呼ばれる）
 }
 
 hook_python() {
@@ -31,7 +32,7 @@ hook_python() {
 
 hook_io() {
     local py
-    py="$(hook_python)"
+    if [ -n "${HOOK_PY+set}" ]; then py="$HOOK_PY"; else py="$(hook_python)"; fi
     [ -n "$py" ] || return 1
     printf '%s' "$HOOK_INPUT" | "$py" "$HOOK_DIR/_hookio.py" "$1"
 }

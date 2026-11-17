@@ -180,6 +180,30 @@ else
   printf '%s\n' "$hidden" | sed 's/^/      /'
 fi
 
+# --- 5. bash 3.2 (macOS 標準): 日本語など ASCII でない字の直前の裸の変数 ---
+# macOS の /bin/bash 3.2 は UTF-8 のロケールで、"$LOG）" の「）」の最初のバイトまで変数名に読む。
+# set -u のスクリプトは「unbound variable」で落ちる（v2.4.0 の setup/raw-setup.sh が最初の確認の前に落ちた）。
+# 直し方: ${LOG} と括る。
+shell_files() { # git に載っているものと、まだ add していない新しいもの。git が無ければ find で
+  git ls-files --cached --others --exclude-standard '*.sh' 2>/dev/null \
+    || find . -name '*.sh' -not -path '*/node_modules/*' -not -path './.git/*'
+}
+# [^[:print:][:cntrl:]] は C ロケールで 0x80〜0xFF（ASCII でないバイト）だけ。タブ・CR は数えない
+bare=$(shell_files | while IFS= read -r f; do
+  LC_ALL=C grep -n -E '\$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:cntrl:]]' "$f" 2>/dev/null \
+    | LC_ALL=C grep -v -E '^[0-9]+:[[:space:]]*#' | sed "s|^|$f:|"   # コメントの行は bash が読まないので除く
+done)
+# 検査そのものが動いているか（grep が失敗すると空の結果で素通りするので、既知の不良の例で確かめる）
+lint_probe=$(printf 'echo "$X\xef\xbc\x89"\n' | LC_ALL=C grep -c -E '\$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:cntrl:]]' || true)
+if [ "$lint_probe" != "1" ]; then
+  bad "the bare-\$VAR check itself does not work here (grep did not catch the known-bad sample)"
+elif [ -z "$bare" ]; then
+  ok "no bare \$VAR right before a non-ASCII character in shell scripts (bash 3.2 safe)"
+else
+  bad "bare \$VAR right before a non-ASCII character (bash 3.2 reads part of the next character as the name) — write \${VAR}:"
+  printf '%s\n' "$bare" | sed 's/^/      /'
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then printf '%sAll consistency checks passed.%s\n' "$grn" "$off"
 else printf '%sConsistency checks FAILED — fix the BAD items above.%s\n' "$red" "$off"; fi

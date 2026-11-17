@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -437,3 +438,109 @@ def test_session_start_starts_the_watcher_for_unwatched_jobs(project: Path, tmp_
         assert "見張りの無いジョブ" not in res.stdout
     finally:
         _stop_watcher(project, live, tmp_path)
+
+
+# ---------- v2.4.1: 真っさらな Mac の動作テストで見つかったこと ----------
+
+def test_a_misplaced_file_written_by_a_shell_command_is_caught(project: Path) -> None:
+    """F7: Claude が Bash（mkdir && printf > …）で書くと、Write の道具を通らないので警告が出なかった。"""
+    target = project / "office" / "research" / "papers" / "note.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("テスト\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash",
+               "tool_input": {"command": "mkdir -p office/research/papers && printf 'テスト' > office/research/papers/note.md"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/note.md" in res.stderr
+
+
+def test_an_old_misplaced_file_does_not_warn_on_every_shell_command(project: Path) -> None:
+    """前からある置き違いでは、シェルの道具のたびに警告しない（2 分の窓を過ぎたら黙る）。
+    ctime はテストで過去にできないので、時計を進めて確かめる。"""
+    sys.path.insert(0, str(HOOKS))
+    import _hookio
+    target = project / "office" / "research" / "papers" / "old.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("前から\n", encoding="utf-8")
+    later = time.time() + 2 * _hookio.RECENT_SECONDS
+    assert _hookio.recent_office_files(project, now=later, places=["office/research/papers"]) == []
+    assert _hookio.recent_office_files(project, places=["office/research/papers"]) == ["office/research/papers/old.md"]
+
+
+def test_fresh_operations_files_written_by_a_shell_command_are_fine(project: Path) -> None:
+    (project / "office" / "secretary" / "notes" / "2026-11-16-decisions.md").write_text("決定\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "echo 決定 >> …"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_the_location_check_runs_after_shell_commands() -> None:
+    hooks = json.loads((HOOKS / "hooks.json").read_text(encoding="utf-8"))
+    matchers = [h.get("matcher", "") for h in hooks["hooks"]["PostToolUse"]]
+    assert any("Bash" in m.split("|") for m in matchers)
+
+
+LEGACY_TO_WORK = [
+    ("office/research/papers/a.md", "work/papers/a.md"),
+    ("office/research/topics/a.md", "work/topics/a.md"),
+    ("office/research/reports/a.md", "work/reports/a.md"),
+    ("office/writing/manuscripts/a.md", "work/manuscripts/a.md"),
+    ("office/analysis/results/a.csv", "work/analyses/a.csv"),
+    ("office/analysis/figures/a.png", "work/figures/a.png"),
+    ("office/analysis/notebooks/a.ipynb", "work/notebooks/a.ipynb"),
+    ("office/presentation/slides/a.pptx", "work/presentations/slides/a.pptx"),
+    ("office/presentation/figures/a.png", "work/figures/a.png"),
+    ("office/engineering/scripts/a.py", "work/scripts/a.py"),
+    ("office/engineering/tools/a.py", "work/tools/a.py"),
+]
+
+
+@pytest.mark.parametrize("written,suggested", LEGACY_TO_WORK)
+def test_every_old_place_suggests_its_work_place(project: Path, written: str, suggested: str) -> None:
+    payload = {"cwd": str(project), "tool_name": "Write", "tool_input": {"file_path": str(project / written)}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and f"{written} → {suggested}" in res.stderr
+
+
+@pytest.mark.parametrize("written,suggested", LEGACY_TO_WORK)
+def test_every_old_place_is_seen_after_a_shell_command(project: Path, written: str, suggested: str) -> None:
+    (project / written).parent.mkdir(parents=True, exist_ok=True)
+    (project / written).write_text("x\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "…"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and suggested in res.stderr
+
+
+def test_an_old_file_moved_into_an_old_place_by_a_shell_command_is_caught(project: Path) -> None:
+    """mv・cp -p は更新時刻を古いまま保つ。置いた時刻（ctime）でも拾う。"""
+    src = project / "work" / "old.md"
+    src.write_text("前から\n", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(src, (old, old))
+    dest = project / "office" / "research" / "papers" / "old.md"
+    dest.parent.mkdir(parents=True)
+    src.rename(dest)                                         # mv: 更新時刻は 1 時間前のまま
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "mv work/old.md office/research/papers/"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/old.md" in res.stderr
+
+
+def test_only_the_old_places_are_scanned_after_a_shell_command(project: Path) -> None:
+    scanned: list[str] = []
+    sys.path.insert(0, str(HOOKS))
+    import _hookio
+    (project / "office" / "computation" / "jobs").mkdir(parents=True, exist_ok=True)
+    (project / "office" / "computation" / "jobs" / "x.md").write_text("記録\n", encoding="utf-8")
+    (project / "office" / "research" / "papers").mkdir(parents=True)
+    (project / "office" / "research" / "papers" / "y.md").write_text("置き違い\n", encoding="utf-8")
+    found = _hookio.recent_office_files(project, places=["office/research/papers"])
+    assert found == ["office/research/papers/y.md"]
+
+
+def test_an_empty_list_of_old_places_scans_nothing(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sys.path.insert(0, str(HOOKS))
+    import _hookio
+    (project / "office" / "computation" / "jobs").mkdir(parents=True, exist_ok=True)
+    (project / "office" / "computation" / "jobs" / "x.md").write_text("記録\n", encoding="utf-8")
+    monkeypatch.setenv("RAW_LEGACY_PLACES", "  \n")
+    data = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "ls"}}
+    assert _hookio.edited_paths(data, project) == []
