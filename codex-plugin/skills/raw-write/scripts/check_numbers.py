@@ -138,7 +138,11 @@ _LETTERS = re.compile(r"[A-Za-z]*")
 INTEGER_ID = "英字が続く整数（識別子とみなした）"
 PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
-_DECIMAL_COMMA = re.compile(r"(?<![\d,.])(?:\d+,\d{1,2}|0,\d+)(?![\d,])")  # 0,52・1,25・0,125: 小数点のカンマかもしれない
+_DECIMAL_COMMA = re.compile(r"(?<![\d,.])(?:\d+,\d{1,2}|0,\d+)(?![\d,]|\.\d)")  # 0,52・1,25・0,125: 小数点のカンマかもしれない
+# 数として読まないときは、続く指数（1,5 × 10³・2,5e-3）もいっしょに外す（10³ だけを 1000 と読まない）
+_DECIMAL_COMMA_NUMBER = re.compile(
+    _DECIMAL_COMMA.pattern + rf"(?:\s?[eE]{_SIGN}?\d+|\s*{_TIMES}\s*10{_CARET}{_SIGN}?\s*\d+\s*[}})]?)?"
+)
 _MINUS_LIKE = str.maketrans("−–‐‑", "----")
 MAX_EXPONENT_DIGITS = 6
 _MINUS_SPELLINGS = (
@@ -461,7 +465,7 @@ def extract_numbers(
     line = _strip_noise(normalize(text))
     # 小数点のカンマかもしれない書き方は数として読まない（0 と 125 に割って一覧の 125 と偽って一致させない）。
     # 原稿では decimal_comma_spots が（参考）として挙げる
-    line = _DECIMAL_COMMA.sub(lambda m: " " * len(m.group(0)), line)
+    line = _DECIMAL_COMMA_NUMBER.sub(lambda m: " " * len(m.group(0)), line)
     pattern = _NUM_GROUPED if thousands else _NUM_PLAIN
     matches = list(pattern.finditer(line))
     read = [_read_one(m, line, location, include_integers) for m in matches]
@@ -608,9 +612,16 @@ def _table_lines(path: Path) -> list[tuple[str, str]]:
         for row in reader:
             out.append((f"L{start}", " | ".join(row)))
             start = reader.line_num + 1
-    except csv.Error:  # 閉じていない引用符など: 残りの行を飲み込ませず、1 行ずつ区切りで分ける
-        out = [(f"L{i}", " | ".join(line.split(delimiter))) for i, line in enumerate(text.splitlines(), start=1)]
+    except csv.Error:  # 閉じていない引用符など: 残りの行を飲み込ませず、1 行ずつ読み直す（壊れた行だけ区切りで分ける）
+        out = [(f"L{i}", " | ".join(_table_row(line, delimiter))) for i, line in enumerate(text.splitlines(), start=1)]
     return out
+
+
+def _table_row(line: str, delimiter: str) -> list[str]:
+    try:
+        return next(csv.reader([line], delimiter=delimiter, strict=True), [])
+    except csv.Error:
+        return line.split(delimiter)
 
 
 def _text_lines(path: Path) -> list[tuple[str, str]]:

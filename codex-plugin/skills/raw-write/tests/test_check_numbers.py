@@ -1095,3 +1095,24 @@ def test_a_huge_shared_exponent_after_parentheses_does_not_stop_the_check() -> N
 def test_an_inner_exponent_is_not_overridden_or_dropped_by_an_outer_one() -> None:
     """LOW: 「(1.2×10^3) × 10^2」で外の 10^2 を黙って捨てていた。共有せず、外の 10^2 も数として残す（一覧に無ければ挙がる）。"""
     assert _values("(1.2×10^3) × 10^2") == ["1.2e3", "1e2"]
+
+
+# ---------- python-reviewer（v2.4.2 の 2 周目）----------
+
+@pytest.mark.parametrize("text,expected", [("values 5,10.5 mol", ["10.5e0"]), ("N = 12,5.5", ["5.5e0"])])
+def test_a_comma_before_a_decimal_point_is_not_cut_in_the_middle(text: str, expected: list[str]) -> None:
+    """MEDIUM: 「5,10.5」の「5,10」を小数点のカンマとして消し、残った「.5」を 0.5 と読んでいた。"""
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize("text", ["T = 1,5 × 10^3 K", "k = 2,5e-3", "k = 2,5 × 10⁻³"])
+def test_the_power_of_ten_after_a_decimal_comma_is_not_left_alone(text: str) -> None:
+    """LOW: 「1,5 × 10^3」の係数だけを消し、10^3（= 1000）だけを読んで一覧の 1000 と偽って一致しえた。"""
+    assert _values(text, include_integers=True) == []
+
+
+def test_one_broken_csv_row_does_not_break_the_quoted_cells_of_other_rows(tmp_path: Path) -> None:
+    """MEDIUM: 閉じていない引用符などで csv が失敗したとき、全部の行を区切りで割り、正しい行の "1,234.5" を壊していた。"""
+    p = tmp_path / "facts.csv"
+    p.write_text('x,"1,234.5",0.5\ny,"abc"d,2.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "1234.5"), ("L1", "0.5"), ("L2", "2.5")]
