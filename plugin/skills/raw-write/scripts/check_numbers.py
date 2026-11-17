@@ -34,14 +34,16 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import csv
 import dataclasses
+import io
 import re
 import sys
 import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Literal
 
@@ -114,7 +116,7 @@ _CARET = r"\s*\$?\s*\^\s*[{(]?\s*"  # 10^-3・10^{-3}・10$^{-3}$・10^(-3)
 _LENGTH_UNIT = r"(?:mm|cm|µm|μm|um|nm|pm|m|in|px|pt)\b"
 _EXPONENT = (
     rf"(?:\s?[eE](?P<eexp>{_SIGN}?\d+)"
-    rf"|\s*{_TIMES}\s*10{_CARET}(?P<texp>{_SIGN}?\d+)\s*[}})]?"
+    rf"|\s*{_TIMES}\s*10{_CARET}(?P<texp>{_SIGN}?\s*\d+)\s*[}})]?"  # 10^{- 3} の空白も
     rf"|\s*{_TIMES_NO_LETTER}\s*10\s*(?P<nexp>{_SIGN}\s*\d+)(?!\d)"
     rf"|\s*[xX]\s*10(?P<xexp>[-−–‐‑]\d+)(?!\d)(?!\s*{_LENGTH_UNIT})"  # 5 x 10-3 M は指数、0.5 x 10-20 mm は寸法
     rf"|{_TIMES_NO_LETTER}10(?P<gexp>(?!0+(?!\d))\d{{1,2}})(?!\d))?"  # 1.2×103: 上付きが失われた指数（読めないとして挙げる）
@@ -123,7 +125,16 @@ _MANTISSA_GROUPED = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|(?<![.\d])\.\d+
 _MANTISSA_PLAIN = r"\d+(?:\.\d+)?|(?<![.\d])\.\d+"
 _NUM_GROUPED = re.compile(rf"(?P<sign>[{SIGN_CHARS}])?(?P<mant>{_MANTISSA_GROUPED})" + _EXPONENT)
 _NUM_PLAIN = re.compile(rf"(?P<sign>[{SIGN_CHARS}])?(?P<mant>{_MANTISSA_PLAIN})" + _EXPONENT)
-_BARE_POWER = re.compile(rf"{_CARET}({_SIGN}?\d+)\s*[}})]?")
+_BARE_POWER = re.compile(rf"{_CARET}({_SIGN}?\s*\d+)\s*[}})]?")
+_PAREN_POWER = re.compile(  # (1.2 ± 0.1) × 10⁻³: 括弧の中の数が共通の指数を持つ
+    rf"\((?P<inner>[^()]*)\)\s*{_TIMES}\s*(?P<ten>10){_CARET}(?P<pexp>{_SIGN}?\s*\d+)\s*[}})]?"
+)
+_UNIT_AFTER = re.compile(  # 整数の直後に付いた単位（12mL・300K・2h）。付いていない英字（31G・3D・13C・1a）は識別子
+    r"(?:[kmµμunpfMGT]?(?:mol|cal|Hz|Pa|eV|Da|bar|L|g|M|m|s|J|W|V|K)|min|h|wt|ppm|ppb|rpm|atm|Torr)(?![A-Za-z])"
+)
+_LETTERS = re.compile(r"[A-Za-z]*")
+INTEGER_ID = "英字が続く整数（識別子とみなした）"
+PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
 _DECIMAL_COMMA = re.compile(r"(?<![\d,.])\d+,\d{1,2}(?![\d,])")
 _MINUS_LIKE = str.maketrans("−–‐‑", "----")
@@ -132,8 +143,8 @@ _MINUS_SPELLINGS = (
     (re.compile(r"\$[-−]\$"), "−"),  # $-$0.52（ACS 系の LaTeX）
     (re.compile(r"&minus;|&#8722;|&#x2212;", re.I), "−"),
     (re.compile(r"\\(?:textminus|minus)\b\s*"), "−"),
-    (re.compile(r"([-−])\s*\\[,;:! ]\s*"), r"\1"),  # $-\,0.52$
-    (re.compile(r"((?:^|[=(≈:（＝：])\s*)([-−])\s+(?=\.?\d)"), r"\1\2"),  # 「= − 0.52」「(− 0.52)」（引き算の 1.2 − 0.5 は除く）
+    (re.compile(r"([-−－﹣])\s*\\[,;:! ]\s*"), r"\1"),  # $-\,0.52$
+    (re.compile(r"((?:^|[=(≈:（＝：])\s*)([-−－﹣])\s+(?=\.?\d)"), r"\1\2"),  # 全角のマイナス「－ 0.52」も  # 「= − 0.52」「(− 0.52)」（引き算の 1.2 − 0.5 は除く）
 )
 _RANGE_BETWEEN = re.compile(r"\s*$")
 _RANGE_WORD = re.compile(r"\s*[-–—~〜]\s*$|\s+to\s+$")  # 「2.5 – 3.5 × 10³」「0.5 to 1.5 × 10⁻³」
@@ -198,7 +209,9 @@ class Number:
 
     @property
     def value(self) -> Decimal:
-        return self.mantissa.scaleb(self.exponent)
+        with localcontext() as ctx:
+            ctx.prec = PRECISION
+            return self.mantissa.scaleb(self.exponent)
 
     @property
     def is_plain_integer(self) -> bool:
@@ -341,7 +354,7 @@ def _bare_power(match: re.Match[str], line: str, sign: str, location: str, bound
     power = _BARE_POWER.match(line, match.end())
     if power is None:
         return None
-    digits = power.group(1).translate(_MINUS_LIKE)
+    digits = re.sub(r"\s+", "", power.group(1)).translate(_MINUS_LIKE)
     mantissa = Decimal(sign + "1")
     if len(digits.lstrip("+-")) > MAX_EXPONENT_DIGITS:
         return Number("10^…", mantissa, 0, 0, location, bound, unreadable=True)
@@ -392,9 +405,39 @@ def _read_one(match: re.Match[str], line: str, location: str, include_integers: 
         return power, ""
     number = _to_number(match, sign, location, bound)
     if number.is_plain_integer and not number.unreadable and _exponent_text(match) is None:
-        if not include_integers or _is_ascii_letter(line[end : end + 1]):
+        if not include_integers:
             return None, ""
+        if _is_ascii_letter(line[end : end + 1]) and not _UNIT_AFTER.match(line, end):
+            return None, INTEGER_ID
     return number, ""
+
+
+def _consume_powers(matches: list[re.Match[str]], read: list[tuple[Number | None, str]], line: str) -> None:
+    """「10^{-3}」を 1 つの数（0.001）と読んだら、その指数（-3）を別の数として読まない。"""
+    until = -1
+    for i, (match, (number, _reason)) in enumerate(zip(matches, read)):
+        if match.start() < until:
+            read[i] = (None, "")
+            continue
+        if number is not None and match.group("mant") == "10" and _exponent_text(match) is None:
+            power = _BARE_POWER.match(line, match.end())
+            if power is not None:
+                until = power.end()
+
+
+def _share_paren_powers(matches: list[re.Match[str]], read: list[tuple[Number | None, str]], line: str) -> None:
+    """「(1.2 ± 0.1) × 10⁻³」の括弧の中の数に指数を当て、括弧の後の「10⁻³」は数として読まない。"""
+    for group in _PAREN_POWER.finditer(line):
+        exponent = int(re.sub(r"\s+", "", group.group("pexp")).translate(_MINUS_LIKE))
+        if abs(exponent) > MAX_EXPONENT:
+            continue
+        for i, (match, (number, reason)) in enumerate(zip(matches, read)):
+            if match.start() == group.start("ten"):
+                read[i] = (None, "")
+            elif number is not None and not number.unreadable and number.exponent == 0 \
+                    and group.start("inner") <= match.start() < group.end("inner"):
+                text = f"{_fmt(number.mantissa)}×10^{exponent}"
+                read[i] = (dataclasses.replace(number, exponent=exponent, text=text), reason)
 
 
 def extract_numbers(
@@ -412,6 +455,8 @@ def extract_numbers(
     pattern = _NUM_GROUPED if thousands else _NUM_PLAIN
     matches = list(pattern.finditer(line))
     read = [_read_one(m, line, location, include_integers) for m in matches]
+    _consume_powers(matches, read, line)
+    _share_paren_powers(matches, read, line)
     found: list[Number] = []
     for i, (match, (number, reason)) in enumerate(zip(matches, read)):
         shared = _range_exponent(match, matches[i + 1] if i + 1 < len(matches) else None, read[i + 1][0] if i + 1 < len(read) else None, line)
@@ -420,6 +465,8 @@ def extract_numbers(
             number = dataclasses.replace(base, exponent=shared, text=f"{_fmt(base.mantissa)}×10^{shared}")
         if number is not None:
             found.append(number)
+        elif reason == INTEGER_ID and skipped is not None:
+            skipped.append(Skipped(location, match.group(0).strip() + _LETTERS.match(line, match.end()).group(0), reason))
         elif reason and skipped is not None and ("." in match.group("mant") or _exponent_text(match)):
             skipped.append(Skipped(location, match.group(0).strip(), reason))
     return found
@@ -457,6 +504,12 @@ def _match_at(mantissa: Decimal, decimals: int, target: Decimal, bound: Bound | 
 
 
 def _compare(number: Number, fact: Number) -> Status:
+    with localcontext() as ctx:
+        ctx.prec = PRECISION  # 0.1499…9（29 桁）を先に 0.15 に丸めて 0.2 と一致させない
+        return _compare_exactly(number, fact)
+
+
+def _compare_exactly(number: Number, fact: Number) -> Status:
     if fact.bound is not None and fact.bound != number.bound:
         return "missing"  # 一覧の「< 0.05」は、原稿の「= 0.05」の裏付けにしない
     if fact.is_plain_integer and number.decimals > 0 and number.exponent == 0:
@@ -534,14 +587,28 @@ def _strip_tex(line: str) -> str:
     return line
 
 
+def _table_lines(path: Path) -> list[tuple[str, str]]:
+    """CSV・TSV をセルに分け、「 | 」でつないだ行にする（引用符の中の「1,234.5」は 1 つのセルのまま。
+    セルの区切りが消えるので、セルの中のカンマは桁区切りとして読める）。場所は行の始まりの行番号。"""
+    text = path.read_text(encoding="utf-8-sig")
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter="," if path.suffix.lower() == ".csv" else "\t")
+    out, start = [], 1
+    for row in reader:
+        out.append((f"L{start}", " | ".join(row)))
+        start = reader.line_num + 1
+    return out
+
+
 def _text_lines(path: Path) -> list[tuple[str, str]]:
+    if path.suffix.lower() in TABLE_SUFFIXES:
+        return _table_lines(path)
     lines = path.read_text(encoding="utf-8-sig").splitlines()
     suffix = path.suffix.lower()
     out = []
     for i, line in enumerate(lines, start=1):
         if suffix == ".tex":
             line = _strip_tex(line)
-        elif suffix not in TABLE_SUFFIXES:
+        else:
             line = _LIST_MARKER.sub(" ", line, count=1)
         out.append((f"L{i}", line))
     return out
@@ -729,13 +796,9 @@ def read_lines(path: Path) -> list[tuple[str, str]]:
 
 
 def read_numbers(path: Path, include_integers: bool = False, skipped: list[Skipped] | None = None) -> list[Number]:
-    """ファイルから数を抜き出す。``skipped`` を渡すと、読まなかった小数をそこに足す。"""
-    thousands = path.suffix.lower() not in TABLE_SUFFIXES
-    return [
-        n
-        for loc, line in read_lines(path)
-        for n in extract_numbers(line, loc, include_integers, thousands, skipped)
-    ]
+    """ファイルから数を抜き出す。``skipped`` を渡すと、読まなかった数をそこに足す。
+    CSV・TSV もセルに分けてから読むので、セルの中のカンマは桁区切り。"""
+    return [n for loc, line in read_lines(path) for n in extract_numbers(line, loc, include_integers, True, skipped)]
 
 
 def decimal_comma_spots(path: Path) -> list[str]:
@@ -769,8 +832,16 @@ class Notes:
 
 
 def _skipped_lines(skipped: list[Skipped]) -> list[str]:
-    head = f"（参考）読まなかった小数 {len(skipped)} 個（照合していない。本文の値が混ざっていないか目で確かめる）:"
-    return [head, *(f"  {s.location}  {s.text}（{s.reason}）" for s in skipped)]
+    out = []
+    decimals = [s for s in skipped if s.reason != INTEGER_ID]
+    integers = [s for s in skipped if s.reason == INTEGER_ID]
+    if decimals:
+        out.append(f"（参考）読まなかった小数 {len(decimals)} 個（照合していない。本文の値が混ざっていないか目で確かめる）:")
+        out.extend(f"  {s.location}  {s.text}（{s.reason}）" for s in decimals)
+    if integers:
+        out.append(f"（参考）読まなかった整数 {len(integers)} 個（英字が続くので識別子とみなした。単位なら空白を入れて書く）:")
+        out.extend(f"  {s.location}  {s.text}" for s in integers)
+    return out
 
 
 def _report(draft: Path, facts_paths: list[Path], findings: list[Finding], n_facts: int, notes: Notes) -> str:
@@ -834,7 +905,8 @@ def main(argv: list[str] | None = None) -> int:
     except UnicodeDecodeError as exc:
         print(f"読めません（UTF-8 で保存し直してください）: {exc}", file=sys.stderr)
         return 2
-    except (OSError, ValueError, KeyError, RuntimeError, NotImplementedError, zipfile.BadZipFile, ET.ParseError) as exc:
+    except (OSError, ValueError, KeyError, RuntimeError, NotImplementedError, zipfile.BadZipFile, ET.ParseError,
+            csv.Error) as exc:
         print(f"読めません: {exc}", file=sys.stderr)
         return 2
     if not facts:

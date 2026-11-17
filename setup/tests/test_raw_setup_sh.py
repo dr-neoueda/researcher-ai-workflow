@@ -109,10 +109,22 @@ def test_an_old_python_is_replaced(tmp_path: Path, fresh_mac: dict) -> None:
 
 
 def test_homebrew_is_added_to_zprofile_once(fresh_mac: dict) -> None:
-    run_setup(fresh_mac["env"])
-    run_setup(fresh_mac["env"])                                              # 2 回目は brew が PATH に無くても置き場所から読む
+    first = run_setup(fresh_mac["env"])
+    second = run_setup(fresh_mac["env"], answers="y\nn\nn\n")              # 2 回目は brew が PATH に無くても置き場所から読む
+    assert first.returncode == 0 and second.returncode == 0, second.stdout + second.stderr
     zprofile = (fresh_mac["home"] / ".zprofile").read_text(encoding="utf-8")
     assert zprofile.count("brew shellenv") == 1 and str(fresh_mac["prefix"]) in zprofile
+
+
+def test_a_second_run_with_every_required_tool_finishes(fresh_mac: dict) -> None:
+    """Codex #73 P1: 必須ツールが揃った Mac（2 回目・任意ツールは断った）で、空の配列の展開が
+    bash 3.2 の set -u で unbound variable になり、Claude・動作確認・要約まで進まなかった。"""
+    run_setup(fresh_mac["env"])
+    res = run_setup(fresh_mac["env"], answers="y\nn\nn\n")
+    out = res.stdout + res.stderr
+    assert "unbound variable" not in out
+    assert res.returncode == 0, out
+    assert "必須ツールはすべて揃っています" in out and "動作確認" in out and "claude: 9.9.9" in out
 
 
 def test_an_installed_but_unlisted_homebrew_is_used_without_reinstalling(fresh_mac: dict) -> None:

@@ -371,12 +371,16 @@ def test_a_japanese_utf16_file_with_a_bom_is_searchable(tmp_path: Path) -> None:
     assert hits and hits[0].paper.title == "結晶構造の研究"
 
 
-def test_a_japanese_utf16_file_without_a_bom_is_unreadable_not_garbage(tmp_path: Path) -> None:
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_a_japanese_utf16_file_without_a_bom_is_searchable_not_garbage(tmp_path: Path, encoding: str) -> None:
+    """NUL が少なく（日本語が多い）BOM も無い UTF-16。cp932 では NUL まじりの化けた字に読めてしまうので、
+    NUL のバイトの位置で UTF-16 として読む（Codex #72: 以前は「読めない」に数え、探せなかった）。"""
     lib = tmp_path / "md"
     lib.mkdir()
-    (lib / "ja16.md").write_bytes(JAPANESE.encode("utf-16-le"))  # cp932 では NUL まじりの化けた字に読めてしまう
+    (lib / "ja16.md").write_bytes(JAPANESE.encode(encoding))
     papers, unreadable = sl.load_library_report(lib)
-    assert papers == [] and [p.name for p in unreadable] == ["ja16.md"]
+    assert unreadable == [] and [p.title for p in papers] == ["結晶構造の研究"]
+    assert papers[0].encoding_note == "UTF-16"
 
 
 def test_a_utf16_file_is_listed_for_resaving(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -428,3 +432,56 @@ def test_the_doi_link_prefix_is_not_indexed(tmp_path: Path) -> None:
     (lib / "d.md").write_text("---\ntitle: T\ndoi: https://doi.org/10.1/xyz\n---\n# T\n\n## 本文\nzeolite\n", encoding="utf-8")
     papers = sl.load_library(lib)
     assert sl.search(papers, ["https"]) == [] and sl.search(papers, ["10.1/xyz"])
+
+
+# ---------- Codex の事後レビュー（2026-11-17）----------
+
+def _one(tmp_path: Path, data: bytes, query: str) -> tuple[list[sl.Paper], list[sl.Hit]]:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "paper.md").write_bytes(data)
+    papers = sl.load_library(lib)
+    return papers, sl.search(papers, [query])
+
+
+def test_a_bomless_utf16_that_also_decodes_as_utf8_is_read_as_utf16(tmp_path: Path) -> None:
+    """Codex #72: 日本語の多い BOM の無い UTF-16 は NUL が 2 割ほどで UTF-16 の判定を通らず、しかも UTF-8 として
+    読めてしまい（NUL と制御文字の列）、黙って探せなかった。"""
+    papers, hits = _one(tmp_path, "# 分子結晶\n\n## 分子結晶\n分子結晶\n".encode("utf-16-le"), "分子結晶")
+    assert hits and papers[0].title == "分子結晶" and papers[0].encoding_note == "UTF-16"
+
+
+def test_one_broken_byte_in_a_short_utf8_file_does_not_turn_it_into_shift_jis(tmp_path: Path) -> None:
+    """Codex #72: 非 ASCII の少ない UTF-8 は、壊れた 1 バイトで 5% を超え、cp932 で化けた字に読んでいた。"""
+    papers, hits = _one(tmp_path, "# 結晶\n".encode("utf-8") + b"\xff", "結晶")
+    assert hits and papers[0].title == "結晶" and papers[0].encoding_note.startswith("UTF-8")
+
+
+def test_yaml_escapes_in_a_double_quoted_title_are_decoded(tmp_path: Path) -> None:
+    data = '---\ntitle: "\\u5206\\u5b50\\u7d50\\u6676 \\"MOF\\""\n---\n# 本文の題\n\n## 結果\n85 %\n'.encode()
+    papers, hits = _one(tmp_path, data, "分子結晶")
+    assert papers[0].title == '分子結晶 "MOF"' and hits
+
+
+def test_the_body_heading_is_searchable_even_when_the_frontmatter_has_a_title(tmp_path: Path) -> None:
+    """Codex #72: frontmatter の題名があると本文の # 見出しが索引から消えていた。"""
+    data = "---\ntitle: Short name\n---\n# 分子結晶の固相反応\n\n## 結果\n85 %\n".encode()
+    _papers, hits = _one(tmp_path, data, "固相反応")
+    assert hits
+
+
+@pytest.mark.parametrize("front", [
+    "tags: mof\nkeywords: [zeolite]\n",
+    "keywords: [zeolite]\ntags: mof\n",
+    "tags: mof\nkeywords:\n  - zeolite\n",
+])
+def test_a_scalar_tag_and_a_list_of_keywords_are_merged(tmp_path: Path, front: str) -> None:
+    """Codex #72: tags が文字列で keywords がリストだと、後の方を黙って捨てていた。"""
+    papers, hits = _one(tmp_path, f"---\ntitle: Example\n{front}---\n# Example\n".encode(), "zeolite")
+    assert set(papers[0].tags) == {"mof", "zeolite"} and hits
+
+
+def test_a_word_only_in_a_section_heading_is_searchable(tmp_path: Path) -> None:
+    """Codex #72: 節の見出し（## Zeolite synthesis）が索引に入らず、見出しにだけある対象名で探せなかった。"""
+    _papers, hits = _one(tmp_path, b"# Example\n\n## Zeolite synthesis\nYield: 85 %\n", "zeolite")
+    assert hits and hits[0].section == "Zeolite synthesis"

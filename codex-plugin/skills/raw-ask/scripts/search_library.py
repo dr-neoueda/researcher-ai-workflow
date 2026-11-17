@@ -55,6 +55,11 @@ _META_KEYS = {
 _DOI_LINK = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.I)  # 書誌の索引に https・doi・org を入れない
 UTF8_DAMAGE_SHARE = 0.05  # UTF-8 として読めないバイトが、非 ASCII のバイトのこの割合以下なら壊れた UTF-8 とみなす
 UTF16_NUL_SHARE = 0.3  # NUL のバイトがこの割合を超えたら BOM の無い UTF-16 とみなす
+_LIST_KEYS = ("tags", "authors")  # 2 回出たら（tags と keywords など）文字列でもリストでも合わせる
+_YAML_ESCAPE = re.compile(r"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|x[0-9A-Fa-f]{2}|.)")
+_YAML_SIMPLE = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", " ": " ", "0": "\x00",
+                "_": "\u00a0", "N": "\u0085", "L": "\u2028", "P": "\u2029"}
+DEFAULT_SECTION = "本文"  # 最初の「## 」より前の文の節の名前（見出しではないので索引に入れない）
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,7 @@ class Paper:
     tags: tuple[str, ...]
     sections: tuple[Section, ...]
     encoding_note: str = ""  # UTF-8 でなく、文字コードを推定して読んだとき
+    heading: str = ""  # 本文の「# 」見出し（frontmatter の題名と違っても索引に入れる）
 
 
 @dataclass(frozen=True)
@@ -118,9 +124,33 @@ def _index_tokens(text: str) -> list[str]:
     return tokenize(text) + _KANJI.findall(unicodedata.normalize("NFKC", text))
 
 
+def _yaml_unescape(text: str) -> str:
+    """YAML の二重引用符の中のエスケープ（\\u5206・\\"・\\n など）を解く。対になったサロゲートは 1 字にする。"""
+    def one(match: re.Match[str]) -> str:
+        code = match.group(1)
+        if code[0] in "uUx" and len(code) > 1:
+            return chr(int(code[1:], 16))
+        return _YAML_SIMPLE.get(code, "\\" + code)
+
+    out = _YAML_ESCAPE.sub(one, text)
+    try:
+        return out.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeDecodeError:  # 対にならないサロゲート: 解かずに残す
+        return text
+
+
 def _strip_quotes(value: str) -> str:
     value = value.strip()
-    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'" else value
+    if len(value) < 2 or value[0] != value[-1] or value[0] not in "\"'":
+        return value
+    inner = value[1:-1]
+    return _yaml_unescape(inner) if value[0] == '"' else inner.replace("''", "'")
+
+
+def _listed(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    return [value] if value else []
 
 
 def _value(raw: str) -> object:
@@ -158,17 +188,17 @@ def _frontmatter(lines: list[str]) -> tuple[dict[str, object], int]:
             is_block = bool(_BLOCK_SCALAR.match(pair.group(2).strip()))
             current, value = meta.get(key), ("" if is_block else _value(pair.group(2)))
             block, keep_block = is_block, not current
-            if not current:  # 同じキーが 2 回なら先の値を残す（リストどうしは合わせる: tags と keywords）
+            if not current:  # 同じキーが 2 回なら先の値を残す（tags と keywords・著者は合わせる）
                 meta[key] = value
-            elif isinstance(current, list) and isinstance(value, list):
-                meta[key] = [*current, *value]
+            elif key in _LIST_KEYS:
+                meta[key] = [*_listed(current), *_listed(value)]
         elif line.strip():
             return meta, i  # 閉じの --- が無い: ここから本文
     return meta, len(lines)
 
 
 def _sections(lines: list[str]) -> tuple[str, list[Section]]:
-    title, name, buf, out = "", "本文", [], []
+    title, name, buf, out = "", DEFAULT_SECTION, [], []
     for line in lines:
         if line.startswith("# ") and not title:
             title = line[2:].strip()
@@ -211,35 +241,54 @@ def _as_tuple(value: object) -> tuple[str, ...]:
     return (str(value),) if value else ()
 
 
-def _utf16(data: bytes) -> str | None:
-    """UTF-16 なら読む（BOM、無ければ NUL のバイトの位置で判定）。違えば None。"""
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return data.decode("utf-16")
-    if not data or data.count(0) <= UTF16_NUL_SHARE * len(data):
+def _utf16(data: bytes, nul_share: float = UTF16_NUL_SHARE) -> str | None:
+    """UTF-16 なら読む（BOM、無ければ NUL のバイトが nul_share を超えるとき、NUL の位置で LE・BE を決める）。
+    違えば・UTF-16 として読めなければ None。"""
+    try:
+        if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            return data.decode("utf-16")
+        if not data or data.count(0) <= nul_share * len(data):
+            return None
+        odd_nuls = data[1::2].count(0)  # 英字・改行の入った UTF-16LE は奇数番目が NUL
+        return data.decode("utf-16-le" if odd_nuls >= data[0::2].count(0) else "utf-16-be")
+    except UnicodeDecodeError:  # 奇数の長さ・対にならないサロゲート
         return None
-    odd_nuls = data[1::2].count(0)  # 英字の多い UTF-16LE は奇数番目が NUL
-    return data.decode("utf-16-le" if odd_nuls >= data[0::2].count(0) else "utf-16-be")
 
 
-def _read_text(path: Path) -> tuple[str, str]:
-    """本文と、文字コードを推定したときの注記（UTF-8 なら空）。読めなければ UnicodeDecodeError。
-    cp932 は何でも読めてしまう（UTF-16 や壊れた UTF-8 を化けた字で読み、数に入るのに探せない）ので最後に試す。"""
-    data = path.read_bytes()
-    text = _utf16(data)
-    if text is not None:
-        return text, "UTF-16"
+def _eight_bit(data: bytes) -> tuple[str | None, str]:
+    """UTF-8 → 壊れた UTF-8 → cp932 の順に読む。cp932 は何でも読めてしまうので最後。
+    壊れた UTF-8 とみなすのは、置き換えた字が非 ASCII のバイトの 5% 以下か、正しく読めた非 ASCII の字より少ないとき
+    （短い日本語の 1 バイトの壊れで cp932 に落ちて化けないように。cp932 の文はほとんど UTF-8 の字にならない）。"""
     try:
         return data.decode("utf-8-sig"), ""
     except UnicodeDecodeError:
         pass
     damaged = data.decode("utf-8", errors="replace")
-    non_ascii = sum(1 for b in data if b >= 0x80)
-    if damaged.count("\ufffd") <= UTF8_DAMAGE_SHARE * non_ascii:
-        return damaged, f"UTF-8（壊れた文字 {damaged.count(chr(0xFFFD))} 個を置き換えた）"
-    text = data.decode("cp932")  # 読めなければ UnicodeDecodeError（読めないファイルに数える）
-    if "\x00" in text:
-        raise UnicodeDecodeError("cp932", data, 0, 1, f"{path.name} の文字コードが分からない")
-    return text, "Shift_JIS（cp932）"
+    bad = damaged.count("\ufffd")
+    good = sum(1 for ch in damaged if ord(ch) >= 0x80 and ch != "\ufffd")
+    if bad <= UTF8_DAMAGE_SHARE * sum(1 for b in data if b >= 0x80) or bad <= good:
+        return damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）"
+    try:
+        return data.decode("cp932"), "Shift_JIS（cp932）"
+    except UnicodeDecodeError:
+        return None, ""
+
+
+def _read_text(path: Path) -> tuple[str, str]:
+    """本文と、文字コードを推定したときの注記（UTF-8 なら空）。読めなければ UnicodeDecodeError。
+    NUL を含む読みは捨てる（日本語の多い BOM の無い UTF-16 は NUL が少なく、UTF-8 や cp932 でも読めてしまう）。
+    そのときは NUL の位置で UTF-16 として読み直す。"""
+    data = path.read_bytes()
+    text = _utf16(data)
+    if text is not None:
+        return text, "UTF-16"
+    text, note = _eight_bit(data)
+    if text is not None and "\x00" not in text:
+        return text, note
+    text = _utf16(data, nul_share=0.0)
+    if text is not None and "\x00" not in text:
+        return text, "UTF-16"
+    raise UnicodeDecodeError("utf-8", data, 0, 1, f"{path.name} の文字コードが分からない")
 
 
 def load_paper(path: Path) -> Paper:
@@ -252,6 +301,7 @@ def load_paper(path: Path) -> Paper:
         path=path, title=str(meta.get("title") or heading or path.stem), authors=_as_tuple(meta.get("authors")),
         year=str(meta.get("year") or ""), journal=str(meta.get("journal") or ""), doi=str(meta.get("doi") or ""),
         url=str(meta.get("url") or ""), tags=_as_tuple(meta.get("tags")), sections=tuple(sections), encoding_note=note,
+        heading=heading,
     )
 
 
@@ -290,7 +340,8 @@ class _Index:
 def _build_index(papers: list[Paper]) -> _Index:
     chunks = []
     for i, paper in enumerate(papers):
-        head = " ".join([paper.title, *paper.tags])
+        heading = [paper.heading] if paper.heading and paper.heading != paper.title else []
+        head = " ".join([paper.title, *heading, *paper.tags])
         head_tokens = _index_tokens(head)
         chunks.append(_Chunk(i, "題名・タグ", head, Counter(head_tokens), len(head_tokens), TITLE_WEIGHT))
         doi = _DOI_LINK.sub("", paper.doi)
@@ -300,7 +351,8 @@ def _build_index(papers: list[Paper]) -> _Index:
             chunks.append(_Chunk(i, "書誌", biblio, Counter(tokens), len(tokens), 1.0))
         for section in paper.sections:
             weight = SUMMARY_WEIGHT if section.name.lower() in SUMMARY_SECTIONS else 1.0
-            tokens = _index_tokens(section.text)
+            named = section.text if section.name == DEFAULT_SECTION else f"{section.name}\n{section.text}"
+            tokens = _index_tokens(named)  # 見出しにだけある語（## Zeolite synthesis）でも探せるように
             chunks.append(_Chunk(i, section.name, section.text, Counter(tokens), len(tokens), weight))
     postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for idx, chunk in enumerate(chunks):

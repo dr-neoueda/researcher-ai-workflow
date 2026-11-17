@@ -70,6 +70,8 @@ SANDBOX_ENV = ("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
 SANDBOX_OFF = frozenset({"", "0", "false", "no", "off"})
 LOCK = "_watcher.lock"  # 見張りは 1 プロジェクトに 1 本（同時に 2 本起動されたら後の方はすぐ終わる）
 LOCK_FRESH = 60.0  # 中身がまだ書かれていない印は、これより新しければ使用中とみなす（秒）
+TAKEOVER = "_watcher.takeover"  # 死んだ見張りの印を引き継ぐ間だけ置く（2 つの見張りが同時に引き継がないように）
+TAKEOVER_STALE = 10.0  # 引き継ぎの印がこれより古ければ、引き継ぐ途中で落ちた残り（秒）
 START_FAILED = "_start_failed.json"
 HOOK_START_WAIT = 3.0  # hook から起動したとき心拍を待つ（秒）
 START_RETRY_AFTER = 600.0  # hook からの起動に失敗したら、これだけあけてから起動し直す（発言のたびに待たせない）
@@ -108,6 +110,7 @@ class Verdict:
     status: str  # 完走 / 完走していない / 異常終了 / 判定できない
     evidence: tuple[str, ...]
     from_copy: bool = False  # HPC のジョブを手元に取り寄せたコピーで判定した（記録にもそう残す）
+    recorded: bool = False  # 判定を記録に書いた（書かなかったら、記録や次の投入を促さない）
 
 
 def _now() -> str:
@@ -207,12 +210,15 @@ def _job_lock(project: Path, key: str) -> Iterator[None]:
                     _unlock_handle(handle)
 
 
-def _update(project: Path, key: str, expect_state: str, **changes: object) -> Job | None:
-    """読み直して、状態がまだ expect_state のときだけ書き換える。読み直しから書き込みまでは他の書き手を待たせる
-    （古い読み込みで上書きしない・同じ「終わった」を 2 回知らせない）。"""
+_ANY = object()  # _update の expect_verdict の既定（判定は比べない）
+
+
+def _update(project: Path, key: str, expect_state: str, expect_verdict: object = _ANY, **changes: object) -> Job | None:
+    """読み直して、状態がまだ expect_state のとき（expect_verdict を渡したら判定もまだそのとき）だけ書き換える。
+    読み直しから書き込みまでは他の書き手を待たせる（古い読み込みで上書きしない・同じ「終わった」を 2 回知らせない）。"""
     with _job_lock(project, key):
         job = load_job(project, key)
-        if job.state != expect_state:
+        if job.state != expect_state or (expect_verdict is not _ANY and job.verdict != expect_verdict):
             return None
         new = dataclasses.replace(job, **changes)
         _save(project, new)
@@ -278,6 +284,8 @@ def register(
         raise ValueError(f"ジョブの種類が分かりません: {kind}（{' / '.join(KINDS)}）")
     if kind == "local" and host:
         raise ValueError("local のジョブに --host は付けられません（別の計算機なら pbs か slurm で登録する）")
+    if expect_count is not None and expect_count < 1:
+        raise ValueError(f"完走の印の数（--expect-count）は 1 以上にしてください（{expect_count}）")
     tool_key, done_markers, fail_markers = _markers(tool, done, fail)
     template = Job(
         key="", name=name, kind=kind, id=str(job_id), log=log, done=done_markers, fail=fail_markers, host=host,
@@ -477,9 +485,23 @@ def _read_log(project: Path, job: Job) -> LogRead:
         return LogRead(None, on_host=False, notes=(reason, "HPC の側の絶対パスなので、手元のコピーは探さない"
                                                            "（取り寄せたらプロジェクトからの相対パスで登録する）"))
     if local.is_file():
+        if not _newer_than_registration(local, job):
+            return LogRead(None, on_host=False, notes=(
+                reason, f"手元のコピー（{job.log}）は登録より前の時刻なので、前の回のログかもしれず使わない"
+                        "（今回のログなら、時刻を保たずに取り寄せ直すと判定できる）"))
         note = f"{reason}ので、手元のコピーで判定した: {job.log}"
         return LogRead(_read_rows(local, markers), on_host=False, notes=(note,), from_copy=True)
     return LogRead(None, on_host=False, notes=(reason,))
+
+
+def _newer_than_registration(path: Path, job: Job) -> bool:
+    """手元のコピーが、ジョブを登録した後に書かれた（取り寄せた）ものか。登録の時刻が読めなければ False。
+    終わった後に登録し、時刻ごと（rsync -a・scp -p）取り寄せた今回のログも False になる（前の回と見分けられない）。"""
+    try:
+        registered = dt.datetime.fromisoformat(job.registered_at).timestamp()
+        return path.stat().st_mtime >= registered
+    except (ValueError, OSError):
+        return False
 
 
 def _scan_log(rows: list[Row], job: Job) -> tuple[list[str], list[str]]:
@@ -531,7 +553,7 @@ def _verdict(project: Path, job: Job) -> Verdict:
         why = f"{job.host} に ssh が通らない" if read.on_host else "HPC の側の絶対パスで、HPC に届かない"
         notes = (f"できるはずのファイルを確かめられない（{why}）", *_sandbox_hint(job))
         return Verdict("判定できない", notes + tuple(done_lines[:3]) + read.notes)
-    expected = job.expect_count or 1
+    expected = max(job.expect_count or 1, 1)  # 古い記録の 0・負の数で、印の無いログを完走にしない
     if len(done_lines) < expected or missing:
         notes = [f"完走の印 {len(done_lines)} / {expected} 個（{' / '.join(job.done)}）"]
         notes += [f"できていないファイル: {o}" for o in missing]
@@ -548,11 +570,11 @@ def judge(project: Path, key: str) -> Verdict:
     if verdict.status == "判定できない":
         return verdict
     recorded = f"{verdict.status}（手元のコピーで判定）" if verdict.from_copy else verdict.status
-    if _update(project, key, job.state, state="judged", verdict=recorded) is None:
+    if _update(project, key, job.state, expect_verdict=job.verdict, state="judged", verdict=recorded) is None:
         now = load_job(project, key)
         note = f"判定は記録しなかった（判定の間に記録が変わった: {now.state}・{now.verdict or '判定なし'}）"
         return Verdict(verdict.status, verdict.evidence + (note,))
-    return verdict
+    return dataclasses.replace(verdict, recorded=True)
 
 
 def _script() -> str:
@@ -560,8 +582,11 @@ def _script() -> str:
 
 
 def _command(*args: str) -> str:
+    """モデルに打たせるコマンド。Windows では \\ を / にする（Claude Code の Git Bash でも PowerShell でも、
+    Python でも同じパスとして通る。list2cmdline の \\ は Git Bash で消える）。"""
     if os.name == "nt":
-        return subprocess.list2cmdline([Path(sys.executable).name, _script(), *args])
+        parts = [_script(), *args]
+        return subprocess.list2cmdline([Path(sys.executable).name, *(part.replace("\\", "/") for part in parts)])
     return shlex.join(["python3", _script(), *args])
 
 
@@ -689,15 +714,37 @@ def _claim(project: Path) -> bool:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
-            if _lock_held(project, path):
+            if _lock_held(project, path) or not _remove_dead_lock(project, path):
                 return False
-            with contextlib.suppress(OSError):
-                path.unlink()
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as out:
             out.write(str(os.getpid()))
         return True
     return False
+
+
+def _remove_dead_lock(project: Path, path: Path) -> bool:
+    """死んだ見張りの印を消す。2 つの見張りが同じ古い印を「空き」と見ても、先に引き継いだ方の新しい印を
+    後の方が消さないよう、引き継ぎの印（TAKEOVER）を排他的に取ってから見直して消す。消したら True。"""
+    mark = path.with_name(TAKEOVER)
+    try:
+        fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        with contextlib.suppress(OSError):
+            if time.time() - mark.stat().st_mtime >= TAKEOVER_STALE:  # 引き継ぐ途中で落ちた見張りの残り
+                mark.unlink()
+                return _remove_dead_lock(project, path)
+        return False
+    os.close(fd)
+    try:
+        if _lock_held(project, path):  # 見ていた間に別の見張りが引き継いだ
+            return False
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            mark.unlink()
 
 
 def _lock_held(project: Path, path: Path) -> bool:
@@ -862,13 +909,15 @@ def _start_from_hook(project: Path) -> str:
 
 
 def wait_for_heartbeat(project: Path, timeout: float = 5.0) -> bool:
-    """起動した見張りが心拍を書くまで待つ（起動直後に「止まっている」と見えないように）。"""
+    """起動した見張りが心拍を書くまで待つ（起動直後に「止まっている」と見えないように）。見張りが走っている
+    ジョブを全部片付けてすぐ終わった（心拍を消した）ときも、起動できたとみなす。"""
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        if _watcher_alive(project):
+    while True:
+        if _watcher_alive(project) or not any(job.state == "running" for job in load_jobs(project)):
             return True
+        if time.time() >= deadline:
+            return False
         time.sleep(0.2)
-    return _watcher_alive(project)
 
 
 def _project_arg(value: str | None) -> Path:
@@ -930,6 +979,10 @@ NEXT_AFTER_VERDICT = (
     "③ 同じ返事で次に投入するものを決める（無ければ「無い」と書く）"
 )
 NEXT_WHEN_UNDECIDED = "次: 上の理由を解いてから judge し直す（判定できないまま記録しない）"
+NEXT_WHEN_NOT_RECORDED = (
+    "次: 判定は記録していない。上の理由（まだ走っている・判定の間に記録が変わった）を確かめ、"
+    "終わってから（見張りの知らせを待って）judge し直す。ジョブ記録と次の投入はその後"
+)
 
 
 def _cmd_judge(project: Path, key: str) -> int:
@@ -937,7 +990,12 @@ def _cmd_judge(project: Path, key: str) -> int:
     print(f"判定: {verdict.status}（{key}）")
     for line in verdict.evidence:
         print(f"  {line}")
-    print(NEXT_WHEN_UNDECIDED if verdict.status == "判定できない" else NEXT_AFTER_VERDICT)
+    if verdict.recorded:
+        print(NEXT_AFTER_VERDICT)
+    elif verdict.status == "判定できない":
+        print(NEXT_WHEN_UNDECIDED)
+    else:
+        print(NEXT_WHEN_NOT_RECORDED)
     return 0 if verdict.status == "完走" else 1
 
 

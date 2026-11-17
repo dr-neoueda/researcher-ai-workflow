@@ -38,14 +38,25 @@ hook_io() {
 }
 
 hook_project() {
-    local root
+    local root start parent
     if root="$(hook_io project)"; then
-        printf '%s' "$root"
+        printf '%s' "${root%$'\r'}"   # Windows の python の CRLF の残り（_hookio.py は LF で書くが念のため）
         return 0
     fi
-    # python が無いとき: Claude Code の CLAUDE_PROJECT_DIR か、いまの場所
-    root="${CLAUDE_PROJECT_DIR:-$PWD}"
-    [ -d "$root/office/secretary" ] && printf '%s' "$root"
+    # python が無いとき: Claude Code の CLAUDE_PROJECT_DIR、無ければいまの場所から、上へたどって office/secretary/ を探す
+    for start in "${CLAUDE_PROJECT_DIR:-}" "$PWD"; do
+        [ -n "$start" ] || continue
+        root="$start"
+        while :; do
+            if [ -d "$root/office/secretary" ]; then
+                printf '%s' "$root"
+                return 0
+            fi
+            parent="$(dirname "$root")"
+            [ "$parent" = "$root" ] && break
+            root="$parent"
+        done
+    done
     return 0
 }
 

@@ -976,3 +976,89 @@ def test_spaced_ranges_share_the_exponent(text: str, expected: list[str]) -> Non
 @pytest.mark.parametrize("text", ["S1-3.2×10⁻³", "Run3-1.0×10⁻³"])
 def test_an_identifier_before_a_range_dash_gets_no_exponent(text: str) -> None:
     assert [v for v in _values(text) if v.startswith("1e") or v.startswith("3e")] == []
+
+
+# ---------- Codex の事後レビュー（2026-11-17）----------
+
+def _check(tmp_path: Path, draft: str, facts: str, *flags: str, draft_name: str = "draft.md",
+           facts_name: str = "facts.md") -> tuple[int, str]:
+    d, f = tmp_path / draft_name, tmp_path / facts_name
+    d.write_text(draft + "\n", encoding="utf-8")
+    f.write_text(facts + "\n", encoding="utf-8")
+    import contextlib
+    import io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        code = cn.main([str(d), "--facts", str(f), *flags])
+    return code, out.getvalue()
+
+
+@pytest.mark.parametrize("text", [r"$k = 1.2 \times 10^{- 3}$", "k = 1.2 × 10^{- 3}", "k = 1.2 × 10^ - 3"])
+def test_a_space_inside_the_exponent_is_still_read(text: str) -> None:
+    """Codex #69: 「10^{- 3}」の符号と数字の間の空白で指数を読まず、仮数 1.2 だけを照合して一致にしていた。"""
+    assert _values(text) == ["1.2e-3"]
+
+
+@pytest.mark.parametrize("text", ["ΔG = － 0.52 eV", "ΔG = －0.52 eV", "(－ 0.52)"])
+def test_a_full_width_minus_with_a_space_keeps_its_sign(text: str) -> None:
+    assert _values(text) == ["-0.52e0"]
+
+
+def test_a_quoted_csv_cell_with_a_thousands_comma_is_one_number(tmp_path: Path) -> None:
+    """Codex #69: CSV の引用符の中の「1,234.5」を 1 と 234.5 に割り、無い事実を作っていた。"""
+    p = tmp_path / "facts.csv"
+    p.write_text('mass,unit\n"1,234.5",mg\n', encoding="utf-8")
+    assert [str(n.value) for n in cn.read_numbers(p, include_integers=True)] == ["1234.5"]
+    code, _out = _check(tmp_path, "mass = 234.5 mg", 'mass,unit\n"1,234.5",mg', facts_name="facts.csv")
+    assert code == 1
+
+
+def test_a_thousands_comma_in_a_tsv_cell_is_one_number(tmp_path: Path) -> None:
+    p = tmp_path / "facts.tsv"
+    p.write_text("mass\tunit\n1,234.5\tmg\n", encoding="utf-8")
+    assert [str(n.value) for n in cn.read_numbers(p, include_integers=True)] == ["1234.5"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("体積 12mL", ["12e0"]), ("300K で", ["300e0"]), ("2h 加熱", ["2e0"]), ("5mg", ["5e0"]), ("10min", ["10e0"]),
+    ("B3LYP/6-31G(d) で計算", []), ("13C NMR", []), ("3D 構造", []), ("化合物 1a と 2b", []),
+])
+def test_integers_with_a_unit_glued_on_are_read(text: str, expected: list[str]) -> None:
+    """Codex #69: --integers でも「12mL」の 12 を識別子として黙って捨て、誤った体積を照合しなかった。"""
+    assert _values(text, include_integers=True) == expected
+
+
+def test_integers_read_as_identifiers_are_listed(tmp_path: Path) -> None:
+    code, out = _check(tmp_path, "濃度 0.5、3D 構造", "濃度 0.5", "--integers")
+    assert code == 0 and "読まなかった整数" in out and "3D" in out
+
+
+def test_the_exponent_of_a_bare_power_of_ten_is_not_a_second_number() -> None:
+    """Codex #69: --integers で「10^{-3}」を 0.001 と読んだうえ、指数の -3 も別の数として数えていた。"""
+    assert _values(r"$k = 10^{-3}$", include_integers=True) == ["1e-3"]
+    assert _values("k = 10⁻³ と 5 個", include_integers=True) == ["1e-3", "5e0"]
+
+
+@pytest.mark.parametrize("text", ["k = (1.2 ± 0.1) × 10⁻³", r"$k = (1.2 \pm 0.1) \times 10^{-3}$"])
+def test_a_shared_power_of_ten_after_parentheses_applies_inside(text: str) -> None:
+    """Codex #69: 「(1.2 ± 0.1) × 10⁻³」の共通の指数を括弧の中に当てず、正しい値を不一致にしていた。"""
+    assert _values(text) == ["1.2e-3", "0.1e-3"]
+
+
+def test_parentheses_without_a_power_keep_their_numbers() -> None:
+    assert _values("k = (1.2 ± 0.1) s、10⁻³ M") == ["1.2e0", "0.1e0", "1e-3"]
+
+
+def test_rounding_uses_every_digit_of_the_fact(tmp_path: Path) -> None:
+    """Codex #69: Decimal の既定の精度（28 桁）で一覧の値を先に丸め、0.1499…9 を 0.2 に丸めて一致にしていた。"""
+    code, out = _check(tmp_path, "x = 0.2", "x = 0.14999999999999999999999999999")
+    assert code == 1 and "丸めて一致: 0" in out
+
+
+@pytest.mark.parametrize("skill", ["raw-write", "raw-slides"])
+@pytest.mark.parametrize("plugin", ["plugin", "codex-plugin"])
+def test_the_skills_say_what_to_do_when_a_draft_has_no_numbers(plugin: str, skill: str) -> None:
+    """Codex #69: 数の無い原稿は終了コード 2 なのに、SKILL は例外なく「終了コード 0 になってから」を求めていた。"""
+    root = Path(__file__).resolve().parents[4]
+    text = (root / plugin / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+    assert "数が 1 つも取れない" in text and "--integers" in text and "照合は要らない" in text

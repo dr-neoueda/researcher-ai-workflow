@@ -962,16 +962,21 @@ def test_a_local_job_reads_a_log_older_than_its_registration(project: Path) -> N
 
 # ---------- python-reviewer 2 周目 ----------
 
-def test_a_job_registered_after_it_ended_uses_the_fetched_copy_when_the_host_is_down(
+def test_a_copy_older_than_the_registration_is_not_used_when_the_host_is_down(
         project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex #71: HPC に届かないとき、登録より前の時刻の手元のコピー（前の回のログかもしれない）で今回を
+    「完走」と確定していた。終わった後に登録し rsync -a で時刻ごと取り寄せた場合と見分けられないので、
+    どちらも判定しない（誤った「完走」より、届いてから・取り寄せ直してからの判定がよい）。"""
     _with_path(monkeypatch, _fake_bin(tmp_path, "ssh", "exit 255\n"))
     log = project / "work" / "gaussian" / "ts1.log"
     log.write_text(" Normal termination of Gaussian 16\n", encoding="utf-8")
-    os.utime(log, (time.time() - 86_400, time.time() - 86_400))  # rsync -a で HPC の時刻のまま取り寄せた
+    os.utime(log, (time.time() - 86_400, time.time() - 86_400))
     job = jw.register(project, name="x", kind="pbs", job_id="77", host="hpc", tool="gaussian", log="work/gaussian/ts1.log")
     jw._save(project, jw.dataclasses.replace(job, state="finished"))
     verdict = jw.judge(project, job.key)
-    assert verdict.status == "完走" and "hpc に届かない" in " ".join(verdict.evidence)
+    evidence = " ".join(verdict.evidence)
+    assert verdict.status == "判定できない" and "hpc に届かない" in evidence and "登録より前" in evidence
+    assert jw.load_job(project, job.key).state == "finished"            # pending に残り、届いたら判定し直せる
 
 
 def test_a_purged_host_log_falls_back_to_the_fetched_copy(project: Path, tmp_path: Path,
@@ -1267,7 +1272,9 @@ def _registered(project: Path, capsys: pytest.CaptureFixture[str], log_text: str
         log.write_text(log_text, encoding="utf-8")
     jw.main(["register", "--project", str(project), "--name", "b", "--kind", "local", "--id", "1",
              "--tool", "gaussian", "--log", "work/gaussian/b.log"])
-    return capsys.readouterr().out.strip().splitlines()[-1].split()[-1]
+    key = capsys.readouterr().out.strip().splitlines()[-1].split()[-1]
+    jw._update(project, key, "running", state="finished")      # 見張りが終わりを確かめた後（pid 1 は生きている）
+    return key
 
 
 @pytest.mark.parametrize("log_text", [" Normal termination of Gaussian 16\n", " Error termination via Lnk1e\n"])
@@ -1284,3 +1291,125 @@ def test_an_undecidable_judge_asks_to_retry_not_to_record(project: Path, capsys:
     jw.main(["judge", "--project", str(project), key])
     out = capsys.readouterr().out
     assert "判定できない" in out and "judge し直す" in out and "次に投入するもの" not in out
+
+
+# ---------- Codex の事後レビュー（2026-11-17）----------
+
+def test_a_stale_lock_already_taken_over_by_another_watcher_is_left_alone(
+        project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex #71: 2 つの見張りが同じ古い印を「空き」と見たあと、先に引き継いだ方の新しい印を、後の方が消して
+    取り直していた（二つの見張りが同時に動く）。消す前に、引き継ぎの印を取ってから見直す。"""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        lock = project / jw.WATCH_DIR / jw.LOCK
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(str(other.pid), encoding="utf-8")          # 別の見張りが引き継いだばかりの新しい印
+        real = jw._lock_held
+        calls = {"n": 0}
+
+        def stale_view(p: Path, path: Path) -> bool:               # 1 回目は引き継ぎの前に見た古い見方（空き）
+            calls["n"] += 1
+            return False if calls["n"] == 1 else real(p, path)
+
+        monkeypatch.setattr(jw, "_lock_held", stale_view)
+        assert jw._claim(project) is False
+        assert lock.read_text(encoding="utf-8") == str(other.pid)
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_a_takeover_mark_left_by_a_crash_does_not_block_the_next_watcher(project: Path) -> None:
+    watch = project / jw.WATCH_DIR
+    watch.mkdir(parents=True, exist_ok=True)
+    (watch / jw.LOCK).write_text("999999999", encoding="utf-8")   # 死んだ見張りの印
+    _old(watch / jw.LOCK)
+    (watch / jw.TAKEOVER).write_text("", encoding="utf-8")        # 引き継ぎの途中で落ちた
+    _old(watch / jw.TAKEOVER)
+    assert jw._claim(project) is True
+    assert (watch / jw.LOCK).read_text(encoding="utf-8") == str(os.getpid())
+    assert not (watch / jw.TAKEOVER).exists()
+
+
+def test_a_watcher_that_finished_its_work_at_once_is_not_a_failed_start(project: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex #71: 起動した見張りが、もう終わっていたジョブを片付けて心拍を消し、すぐ正常に終わると、
+    心拍が無いことだけで「起動に失敗」と記録し、次のジョブの見張りを 10 分起動しなかった。"""
+    starts: list[list[str]] = []
+
+    def quick_watcher(cmd: list[str]) -> None:                     # 見張りが 1 回で全部を片付けて終わった
+        starts.append(cmd)
+        for job in jw.load_jobs(project):
+            jw._update(project, job.key, "running", state="finished", finished_at=jw._now())
+
+    monkeypatch.setattr(jw, "_default_launch", quick_watcher)
+    monkeypatch.setattr(jw.shutil, "which", lambda _name: None)   # tmux なし（切り離して起動）
+    monkeypatch.setattr(jw, "HOOK_START_WAIT", 0.5)
+    jw.register(project, name="a", kind="pbs", job_id="1", tool="gaussian", log="a.log")
+    assert jw._start_from_hook(project) == ""
+    assert not (project / jw.WATCH_DIR / jw.START_FAILED).exists()
+    jw.register(project, name="b", kind="pbs", job_id="2", tool="gaussian", log="b.log")
+    assert jw._start_from_hook(project) == "" and len(starts) == 2
+
+
+def test_rejudging_at_the_same_time_keeps_the_newer_verdict(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex #71: 判定済みのジョブを 2 者が判定し直すと、古い読みの判定が新しい判定に上書きしていた
+    （状態がどちらも judged で、変わったことに気づかない）。"""
+    job = _job_with_log(project, " Normal termination of Gaussian 16\n")
+    jw._save(project, jw.dataclasses.replace(job, state="judged", verdict="完走していない"))
+    original = jw._verdict
+
+    def newer_judge_meanwhile(p: Path, j: jw.Job) -> jw.Verdict:
+        old_reading = jw.Verdict("完走していない", ("できていないファイル: x.chk",))
+        jw._update(p, j.key, "judged", verdict="完走")              # 判定の間に、取り寄せ後の新しい判定が入った
+        return old_reading
+
+    monkeypatch.setattr(jw, "_verdict", newer_judge_meanwhile)
+    verdict = jw.judge(project, job.key)
+    assert jw.load_job(project, job.key).verdict == "完走"
+    assert "記録しなかった" in " ".join(verdict.evidence)
+    monkeypatch.setattr(jw, "_verdict", original)
+
+
+@pytest.mark.parametrize("count", [0, -1])
+def test_a_count_of_done_markers_below_one_is_rejected(project: Path, count: int) -> None:
+    """Codex #71: --expect-count -1 を受け付け、印の無い空のログを「完走」にしていた。"""
+    with pytest.raises(ValueError, match="1 以上"):
+        jw.register(project, name="x", kind="local", job_id="1", tool="gaussian", log="x.log", expect_count=count)
+    assert jw.main(["register", "--project", str(project), "--name", "x", "--kind", "local", "--id", "1",
+                    "--tool", "gaussian", "--log", "x.log", "--expect-count", str(count)]) == 2
+    assert jw.load_jobs(project) == []
+
+
+def test_the_command_shown_on_windows_survives_git_bash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex #71: Windows で見せるコマンドは list2cmdline の \\ のままで、Git Bash で打つとパスが壊れた。"""
+    from pathlib import PureWindowsPath
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(jw, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(jw, "Path", PureWindowsPath)
+    monkeypatch.setattr(jw, "_script", lambda: r"C:\Users\alice\.codex\plugins\raw\hooks\jobwatch.py")
+    monkeypatch.setattr(jw.sys, "executable", r"C:\Python313\python.exe")
+    command = jw._command("judge", "--project", r"C:\work\my project", "2026-11-17-a")
+    parsed = subprocess.run(["/bin/bash", "-c", 'python.exe() { printf "<%s>\\n" "$@"; }; ' + command],
+                            capture_output=True, text=True, check=True).stdout
+    assert "<C:/Users/alice/.codex/plugins/raw/hooks/jobwatch.py>" in parsed
+    assert "<C:/work/my project>" in parsed and "<2026-11-17-a>" in parsed
+
+
+def test_judging_a_running_job_does_not_ask_to_record_it(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Codex #73: まだ走っているので記録しないと言いながら、「記録を書く・次を投入」と逆の指示を出していた。"""
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        log = project / "work" / "gaussian" / "r.log"
+        log.write_text(" Normal termination of Gaussian 16\n", encoding="utf-8")
+        job = jw.register(project, name="r", kind="local", job_id=str(live.pid), tool="gaussian",
+                          log="work/gaussian/r.log")
+        jw.main(["judge", "--project", str(project), job.key])
+    finally:
+        live.kill()
+        live.wait()
+    out = capsys.readouterr().out
+    assert "判定は記録しない" in out
+    assert "次に投入するもの" not in out and "office/computation/jobs/" not in out
+    assert "judge し直す" in out
