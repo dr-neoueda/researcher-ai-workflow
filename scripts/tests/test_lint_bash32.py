@@ -121,3 +121,21 @@ def test_an_escaped_dollar_that_is_parsed_again_is_still_caught(tmp_path: Path, 
     assert _bash32_fails(root / "a.sh")
     res = _lint(root)
     assert res.returncode == 1 and "a.sh:3:" in res.stdout
+
+
+def test_an_escaped_dollar_in_a_trap_is_still_caught(tmp_path: Path) -> None:
+    """python-reviewer（6 周目）M2: trap の文字列は、走るときにもう一度読まれて $X） が展開される
+    （EXIT の trap は終了コードを変えないので、落ちたことは標準エラーの unbound variable で確かめる）。"""
+    root = _repo(tmp_path, {"a.sh": 'set -u\nX=ok\ntrap "echo \\$X）" EXIT\n'})
+    res = subprocess.run(["/bin/bash", str(root / "a.sh")], capture_output=True, text=True, errors="replace",
+                         env={"PATH": "/usr/bin:/bin", "LC_ALL": "ja_JP.UTF-8"}, timeout=30)
+    assert "unbound variable" in res.stderr
+    lint = _lint(root)
+    assert lint.returncode == 1 and "a.sh:3:" in lint.stdout
+
+
+def test_an_escaped_dollar_sent_to_a_remote_shell_is_still_caught(tmp_path: Path) -> None:
+    """python-reviewer（6 周目）M2: ssh に渡す文字列は向こうのシェルがもう一度読む（trap と同じ）。"""
+    root = _repo(tmp_path, {"a.sh": 'set -u\nssh host "echo \\$X）"\n'})
+    res = _lint(root)
+    assert res.returncode == 1 and "a.sh:2:" in res.stdout

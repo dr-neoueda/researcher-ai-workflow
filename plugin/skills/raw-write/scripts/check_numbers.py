@@ -146,7 +146,9 @@ _UNIT_WORD = rf"(?:{_UNIT_ATOM}(?:\s*[/·⋅∙*]\s*{_UNIT_ATOM}|\s+{_UNIT_ATOM}
 # 範囲のダッシュ。英字にくっついたハイフン・マイナス（L-1・cm-3）は単位の指数なので範囲にしない
 _RANGE_JOIN = r"(?:[–—~〜]|(?<![A-Za-zµμ°%Å])[-−])"
 _JOINED_BEFORE = re.compile(rf"(?:{_PLUS_MINUS}|\d\s*{_UNIT_WORD}(?:{_RANGE_JOIN}|to\b))\s*[-+−–]?\s*$")
-_JOINED_AFTER = re.compile(rf"\s*{_UNIT_WORD}(?:{_PLUS_MINUS}|{_RANGE_JOIN}\s*\d|to\s+\d)")
+# ただし同じ単位がハイフンと数の両側にあれば範囲（5 mg-10 mg・5 mM-10 mM。L-1 s-1 は単位が違うので指数）
+_GLUED_SAME_UNIT = r"(?P<unit>[A-Za-zµμ°%Å]+)[-−]\d+\s*(?P=unit)(?![A-Za-zµμ°%Å])"
+_JOINED_AFTER = re.compile(rf"\s*(?:{_UNIT_WORD}(?:{_PLUS_MINUS}|{_RANGE_JOIN}\s*\d|to\s+\d)|{_GLUED_SAME_UNIT})")
 INTEGER_ID = "英字が続く整数（識別子とみなした）"
 PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
