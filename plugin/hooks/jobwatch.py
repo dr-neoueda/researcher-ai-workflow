@@ -70,8 +70,7 @@ SANDBOX_ENV = ("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
 SANDBOX_OFF = frozenset({"", "0", "false", "no", "off"})
 LOCK = "_watcher.lock"  # 見張りは 1 プロジェクトに 1 本（同時に 2 本起動されたら後の方はすぐ終わる）
 LOCK_FRESH = 60.0  # 中身がまだ書かれていない印は、これより新しければ使用中とみなす（秒）
-TAKEOVER = "_watcher.takeover"  # 死んだ見張りの印を引き継ぐ間だけ置く（2 つの見張りが同時に引き継がないように）
-TAKEOVER_STALE = 10.0  # 引き継ぎの印がこれより古ければ、引き継ぐ途中で落ちた残り（秒）
+TAKEOVER = "_watcher-takeover"  # 見張りの印を作る・引き継ぐ・返すを 1 つずつにする、ファイルの鍵の名前（_job_lock の鍵）
 START_FAILED = "_start_failed.json"
 HOOK_START_WAIT = 3.0  # hook から起動したとき心拍を待つ（秒）
 START_RETRY_AFTER = 600.0  # hook からの起動に失敗したら、これだけあけてから起動し直す（発言のたびに待たせない）
@@ -103,6 +102,7 @@ class Job:
     codex_thread: str | None = None
     last_check: str | None = None
     pid_started: str | None = None  # ローカルのジョブのプロセスの開始時刻（PID の使い回しを見分ける）
+    revision: int = 0  # 記録を書き換えた回数（判定の間に別の書き手が同じ値を書いても、変わったと分かるように）
 
 
 @dataclass(frozen=True)
@@ -210,17 +210,16 @@ def _job_lock(project: Path, key: str) -> Iterator[None]:
                     _unlock_handle(handle)
 
 
-_ANY = object()  # _update の expect_verdict の既定（判定は比べない）
-
-
-def _update(project: Path, key: str, expect_state: str, expect_verdict: object = _ANY, **changes: object) -> Job | None:
-    """読み直して、状態がまだ expect_state のとき（expect_verdict を渡したら判定もまだそのとき）だけ書き換える。
-    読み直しから書き込みまでは他の書き手を待たせる（古い読み込みで上書きしない・同じ「終わった」を 2 回知らせない）。"""
+def _update(project: Path, key: str, expect_state: str, expect_revision: int | None = None,
+            **changes: object) -> Job | None:
+    """読み直して、状態がまだ expect_state のとき（expect_revision を渡したら、記録がまだその回のとき）だけ書き換える。
+    読み直しから書き込みまでは他の書き手を待たせる（古い読み込みで上書きしない・同じ「終わった」を 2 回知らせない）。
+    書くたびに revision を 1 つ進める（判定の文字列が同じでも、間に別の判定が入ったことが分かる）。"""
     with _job_lock(project, key):
         job = load_job(project, key)
-        if job.state != expect_state or (expect_verdict is not _ANY and job.verdict != expect_verdict):
+        if job.state != expect_state or (expect_revision is not None and job.revision != expect_revision):
             return None
-        new = dataclasses.replace(job, **changes)
+        new = dataclasses.replace(job, **changes, revision=job.revision + 1)
         _save(project, new)
         return new
 
@@ -230,6 +229,10 @@ def _from_dict(data: dict) -> Job:
     clean = {k: v for k, v in data.items() if k in fields}
     for name in ("done", "fail", "outputs"):
         clean[name] = tuple(clean.get(name) or ())
+    try:  # 手で直した記録の null・文字列でも書き込みを落とさない
+        clean["revision"] = int(clean.get("revision") or 0)
+    except (TypeError, ValueError):
+        clean["revision"] = 0
     return Job(**clean)
 
 
@@ -570,7 +573,7 @@ def judge(project: Path, key: str) -> Verdict:
     if verdict.status == "判定できない":
         return verdict
     recorded = f"{verdict.status}（手元のコピーで判定）" if verdict.from_copy else verdict.status
-    if _update(project, key, job.state, expect_verdict=job.verdict, state="judged", verdict=recorded) is None:
+    if _update(project, key, job.state, expect_revision=job.revision, state="judged", verdict=recorded) is None:
         now = load_job(project, key)
         note = f"判定は記録しなかった（判定の間に記録が変わった: {now.state}・{now.verdict or '判定なし'}）"
         return Verdict(verdict.status, verdict.evidence + (note,))
@@ -701,54 +704,42 @@ def _release(project: Path) -> None:
     with contextlib.suppress(OSError, ValueError, TypeError, AttributeError):
         if json.loads(beat.read_text(encoding="utf-8")).get("pid") == os.getpid():
             beat.unlink()
-    if _owns_lock(project):
-        with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError), _job_lock(project, TAKEOVER):  # 見て消す間に、別の見張りが引き継いだ印を消さない
+        if _owns_lock(project):
             (_watch_dir(project) / LOCK).unlink()
 
 
 def _claim(project: Path) -> bool:
-    """見張りの印を取る。生きている別の見張りが持っていれば False。死んだ見張りの印は引き継ぐ。"""
+    """見張りの印を取る。生きている別の見張りが持っていれば False。死んだ見張りの印は引き継ぐ。
+    作る・見直す・消す・作り直すを、まとめてファイルの鍵（TAKEOVER）で囲む。囲まないと、2 つの見張りが同じ死んだ印を
+    「空き」と見たり、「印が無い」と見た直後に別の見張りが作った新しい印を消したりして、両方が取れる。
+    鍵は持ち主のプロセスが落ちれば OS が外す（残って次を止めない）。鍵に対応しないファイルシステムでは、記録と同じく
+    鍵なしで進む（引き継がないと、見張りの無いジョブが残り続けるほうが害が大きい）。
+    鍵を待ち切れない・死んだ印を消せない（Windows で読んでいる瞬間）なら、今回は取れなかったとして False。"""
     path = _watch_dir(project) / LOCK
     path.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(2):
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            if _lock_held(project, path) or not _remove_dead_lock(project, path):
+    try:
+        with _job_lock(project, TAKEOVER):
+            if _create_lock(path):
+                return True
+            if _lock_held(project, path):
                 return False
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            out.write(str(os.getpid()))
-        return True
-    return False
-
-
-def _remove_dead_lock(project: Path, path: Path) -> bool:
-    """死んだ見張りの印を消す。2 つの見張りが同じ古い印を「空き」と見ても、先に引き継いだ方の新しい印を
-    後の方が消さないよう、引き継ぎの印（TAKEOVER）を排他的に取ってから見直して消す。消したら True。"""
-    mark = path.with_name(TAKEOVER)
-    try:
-        fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        with contextlib.suppress(OSError):
-            if time.time() - mark.stat().st_mtime >= TAKEOVER_STALE:  # 引き継ぐ途中で落ちた見張りの残り
-                mark.unlink()
-                return _remove_dead_lock(project, path)
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+            return _create_lock(path)
+    except OSError:
         return False
-    os.close(fd)
+
+
+def _create_lock(path: Path) -> bool:
+    """印が無ければ作って自分の pid を書く。もうあれば False。"""
     try:
-        if _lock_held(project, path):  # 見ていた間に別の見張りが引き継いだ
-            return False
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:  # Windows で別のプロセスが読んでいる瞬間など。今回は取れなかったとする
-            return False
-        return True
-    finally:
-        with contextlib.suppress(OSError):
-            mark.unlink()
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(str(os.getpid()))
+    return True
 
 
 def _lock_held(project: Path, path: Path) -> bool:

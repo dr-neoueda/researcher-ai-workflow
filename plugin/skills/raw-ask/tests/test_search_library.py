@@ -509,3 +509,20 @@ def test_template_section_headings_are_not_indexed(tmp_path: Path, heading: str,
     for name in ("a", "b"):
         (lib / f"{name}.md").write_text(f"# Paper {name}\n\n{heading}\nnothing here\n", encoding="utf-8")
     assert sl.search(sl.load_library(lib), [query]) == []
+
+
+# ---------- Codex の確かめの周（2026-11-17、v2.4.2）----------
+
+def test_half_width_katakana_in_shift_jis_is_not_read_as_broken_utf8(tmp_path: Path) -> None:
+    """Codex v2.4.2 #5: cp932 の半角カナ（ﾏｲ = CF B2）は偶然 2 バイトの UTF-8 の字になり、「壊れた字より正しい字が多い」
+    の条件で壊れた UTF-8 と決め、題名が化けて探せなかった（v2.4.1 までは cp932 で読めていた）。"""
+    papers, hits = _one(tmp_path, "# ﾏｲｸﾛ波\n\n## Results\nYield: 85 %\n".encode("cp932"), "マイクロ波")
+    assert papers[0].title == "ﾏｲｸﾛ波" and papers[0].encoding_note == "Shift_JIS（cp932）" and hits
+
+
+@pytest.mark.parametrize("title", ["Müller", "Étude de l'été", "αβγδ", "Привет мир"])
+def test_one_broken_byte_in_a_short_latin_utf8_file_is_still_utf8(tmp_path: Path, title: str) -> None:
+    """python-reviewer（3 周目）M2: 2 バイトの字を証拠に数えなくしたため、ラテン・ギリシャ・キリルの短い UTF-8 が
+    1 バイトの壊れで cp932 に落ちて化けた。cp932 でも損なわずには読めないときは、2 バイトの字も UTF-8 の証拠に数える。"""
+    papers, _hits = _one(tmp_path, f"# {title}\n".encode("utf-8") + b"\xff", "x")
+    assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8")

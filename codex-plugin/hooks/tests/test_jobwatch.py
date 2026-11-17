@@ -908,7 +908,11 @@ def test_judge_keeps_what_another_writer_changed_meanwhile(project: Path, monkey
         return original(p, j)
 
     monkeypatch.setattr(jw, "_verdict", slow_verdict)
-    jw.judge(project, job.key)
+    assert not jw.judge(project, job.key).recorded                 # 読んだ後に記録が変わったので書かない
+    saved = jw.load_job(project, job.key)
+    assert saved.state == "finished" and saved.codex_thread == "thread-later"
+    monkeypatch.setattr(jw, "_verdict", original)
+    assert jw.judge(project, job.key).recorded                     # 判定し直せば書く（別の書き手の変更は残す）
     saved = jw.load_job(project, job.key)
     assert saved.state == "judged" and saved.codex_thread == "thread-later"
 
@@ -1295,23 +1299,15 @@ def test_an_undecidable_judge_asks_to_retry_not_to_record(project: Path, capsys:
 
 # ---------- Codex の事後レビュー（2026-11-17）----------
 
-def test_a_stale_lock_already_taken_over_by_another_watcher_is_left_alone(
-        project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stale_lock_already_taken_over_by_another_watcher_is_left_alone(project: Path) -> None:
     """Codex #71: 2 つの見張りが同じ古い印を「空き」と見たあと、先に引き継いだ方の新しい印を、後の方が消して
-    取り直していた（二つの見張りが同時に動く）。消す前に、引き継ぎの印を取ってから見直す。"""
+    取り直していた（二つの見張りが同時に動く）。見直しは鍵の中だけで行う（鍵の外で見た古い見方では消さない。
+    同時の引き継ぎの並びは test_two_watchers_… と test_a_lock_made_by_a_new_watcher_… で確かめる）。"""
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         lock = project / jw.WATCH_DIR / jw.LOCK
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.write_text(str(other.pid), encoding="utf-8")          # 別の見張りが引き継いだばかりの新しい印
-        real = jw._lock_held
-        calls = {"n": 0}
-
-        def stale_view(p: Path, path: Path) -> bool:               # 1 回目は引き継ぎの前に見た古い見方（空き）
-            calls["n"] += 1
-            return False if calls["n"] == 1 else real(p, path)
-
-        monkeypatch.setattr(jw, "_lock_held", stale_view)
         assert jw._claim(project) is False
         assert lock.read_text(encoding="utf-8") == str(other.pid)
     finally:
@@ -1319,16 +1315,27 @@ def test_a_stale_lock_already_taken_over_by_another_watcher_is_left_alone(
         other.wait()
 
 
-def test_a_takeover_mark_left_by_a_crash_does_not_block_the_next_watcher(project: Path) -> None:
+def test_a_watcher_killed_while_taking_over_does_not_block_the_next_one(project: Path) -> None:
+    """引き継ぎの鍵はファイルの鍵なので、持っていた見張りが落ちれば OS が外す（印のファイルのように残って次を止めない）。"""
+    fcntl = pytest.importorskip("fcntl")
     watch = project / jw.WATCH_DIR
     watch.mkdir(parents=True, exist_ok=True)
     (watch / jw.LOCK).write_text("999999999", encoding="utf-8")   # 死んだ見張りの印
     _old(watch / jw.LOCK)
-    (watch / jw.TAKEOVER).write_text("", encoding="utf-8")        # 引き継ぎの途中で落ちた
-    _old(watch / jw.TAKEOVER)
+    key_file = watch / f"{jw.TAKEOVER}.lock"
+    holder = subprocess.Popen([sys.executable, "-c", (
+        "import fcntl, sys, time; f = open(sys.argv[1], 'a+b'); fcntl.flock(f.fileno(), fcntl.LOCK_EX); "
+        "print('held', flush=True); time.sleep(30)"), str(key_file)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "held"          # 引き継ぎの途中の見張り
+        with open(key_file, "a+b") as probe:                       # 鍵は本当に取られている
+            with pytest.raises(OSError):
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        holder.kill()                                              # 引き継ぎの途中で落ちた
+        holder.wait()
     assert jw._claim(project) is True
     assert (watch / jw.LOCK).read_text(encoding="utf-8") == str(os.getpid())
-    assert not (watch / jw.TAKEOVER).exists()
 
 
 def test_a_watcher_that_finished_its_work_at_once_is_not_a_failed_start(project: Path,
@@ -1431,4 +1438,189 @@ def test_a_dead_lock_that_cannot_be_removed_yet_is_not_an_error(project: Path, m
 
     monkeypatch.setattr(Path, "unlink", busy)
     assert jw._claim(project) is False
-    assert not (watch / jw.TAKEOVER).exists()
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert jw._claim(project) is True                              # 引き継ぎの鍵を持ったままにしていない
+
+
+# ---------- Codex の確かめの周（2026-11-17、v2.4.2）----------
+
+def test_two_watchers_taking_over_the_same_dead_lock_never_both_win(project: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex v2.4.2 #1: 引き継ぎの印が「消す」だけを囲み「作る」を囲んでいなかった。A が古い印を消して印を返した直後、
+    B が「印は無い」と見て、A が作った新しい印を消して取り直し、2 つの見張りが両方とも取れていた。"""
+    import threading
+
+    watch = project / jw.WATCH_DIR
+    watch.mkdir(parents=True, exist_ok=True)
+    lock = watch / jw.LOCK
+    lock.write_text("999999999", encoding="utf-8")                 # 死んだ見張りの印
+    _old(lock)
+    b_saw_dead, a_removed, b_checked, a_done = (threading.Event() for _ in range(4))
+    real_held, real_open = jw._lock_held, os.open
+    b_calls = {"n": 0}
+
+    def held(p: Path, path: Path) -> bool:
+        value = real_held(p, path)
+        if threading.current_thread().name == "B":
+            b_calls["n"] += 1
+            if b_calls["n"] == 1:                                  # B は古い印を「死んでいる」と見た
+                b_saw_dead.set()
+                a_removed.wait(5)
+            elif b_calls["n"] == 2:                                # B が消す前の見直し（A が作る前）
+                b_checked.set()
+                a_done.wait(5)
+        return value
+
+    a_creates = {"n": 0}
+
+    def opening(path, flags, *args):                              # A が古い印を消した後、新しい印を作る直前で待つ
+        if threading.current_thread().name == "A" and Path(path).name == jw.LOCK and flags & os.O_EXCL:
+            a_creates["n"] += 1
+            if a_creates["n"] == 2:
+                a_removed.set()
+                b_checked.wait(1.5)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(jw, "_lock_held", held)
+    monkeypatch.setattr(jw.os, "open", opening)
+    won: dict[str, bool] = {}
+
+    def run(name: str) -> None:
+        won[name] = jw._claim(project)
+        if name == "A":
+            a_done.set()
+
+    b = threading.Thread(target=run, args=("B",), name="B")
+    b.start()
+    assert b_saw_dead.wait(5)
+    a = threading.Thread(target=run, args=("A",), name="A")
+    a.start()
+    a.join(10)
+    b.join(10)
+    assert sorted(won.values()) == [False, True], won
+    assert lock.read_text(encoding="utf-8") == str(os.getpid())
+
+
+def test_a_stale_rejudge_does_not_overwrite_a_newer_one_with_the_same_verdict(
+        project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex v2.4.2 #2: 判定の間に入った新しい判定が、保存済みと同じ文字列（完走）だと変わったことに気づかず、
+    古い読み（出力が無い間の「完走していない」）で上書きしていた。"""
+    job = _job_with_log(project, " Normal termination of Gaussian 16\n")
+    jw._save(project, jw.dataclasses.replace(job, state="judged", verdict="完走"))
+
+    def newer_judge_meanwhile(p: Path, j: jw.Job) -> jw.Verdict:
+        old_reading = jw.Verdict("完走していない", ("できていないファイル: x.chk",))
+        jw._update(p, j.key, "judged", state="judged", verdict="完走")   # 取り寄せた後の新しい判定（同じ文字列）
+        return old_reading
+
+    monkeypatch.setattr(jw, "_verdict", newer_judge_meanwhile)
+    verdict = jw.judge(project, job.key)
+    assert jw.load_job(project, job.key).verdict == "完走"
+    assert not verdict.recorded and "記録しなかった" in " ".join(verdict.evidence)
+
+
+def test_a_record_written_before_revisions_existed_still_loads_and_updates(project: Path) -> None:
+    job = _job_with_log(project, " Normal termination of Gaussian 16\n")
+    path = project / jw.WATCH_DIR / f"{job.key}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("revision", None)                                     # v2.4.1 までの記録
+    data["state"] = "finished"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert jw.judge(project, job.key).recorded
+    assert jw.load_job(project, job.key).state == "judged"
+
+
+def test_a_lock_made_by_a_new_watcher_while_another_takes_over_is_not_removed(
+        project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """python-reviewer（3 周目）H1: 引き継ぎの鍵の中で「印が無い」も「死んでいる」と同じ False に見え、その直後に
+    鍵を取らない新しい見張り C が作った印を、引き継ぎの側 B が消して取り直していた（両方が取れる）。"""
+    import threading
+
+    watch = project / jw.WATCH_DIR
+    watch.mkdir(parents=True, exist_ok=True)
+    lock = watch / jw.LOCK
+    lock.write_text("999999999", encoding="utf-8")                 # 死んだ見張りの印
+    _old(lock)
+    b_saw_missing, c_done = threading.Event(), threading.Event()
+    real_held = jw._lock_held
+    b_calls = {"n": 0}
+
+    def held(p: Path, path: Path) -> bool:
+        value = real_held(p, path)
+        if threading.current_thread().name == "B":
+            b_calls["n"] += 1
+            if b_calls["n"] == 1:
+                path.unlink()                                      # 別の見張りが引き継いで、もう印を返した
+            elif not path.exists():
+                b_saw_missing.set()                                # B は「印が無い」と見た。消す直前
+                c_done.wait(1.5)
+        return value
+
+    monkeypatch.setattr(jw, "_lock_held", held)
+    won: dict[str, bool] = {}
+
+    def run(name: str) -> None:
+        won[name] = jw._claim(project)
+        if name == "C":
+            c_done.set()
+
+    b = threading.Thread(target=run, args=("B",), name="B")
+    b.start()
+    b_saw_missing.wait(2)
+    c = threading.Thread(target=run, args=("C",), name="C")
+    c.start()
+    b.join(10)
+    c.join(10)
+    assert sorted(won.values()) == [False, True], won
+
+
+def test_a_revision_that_is_not_a_number_is_read_as_zero(project: Path) -> None:
+    """LOW: 手で直した記録の revision が null・文字列だと、次の書き込みが TypeError で落ちた。"""
+    job = _job_with_log(project, " Normal termination of Gaussian 16\n")
+    path = project / jw.WATCH_DIR / f"{job.key}.json"
+    for value in (None, "abc"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["revision"], data["state"] = value, "finished"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        assert jw.load_job(project, job.key).revision == 0
+        assert jw.judge(project, job.key).recorded
+
+
+def test_a_watcher_releasing_its_lock_does_not_remove_the_one_taken_over_meanwhile(
+        project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """3 周目: 終わる見張り W が「印は自分のもの」と見てから消すまでの間に、W を死んだと見た B が引き継ぐと、
+    W が B の新しい印を消し、B は印の無いまま動いていた（次の見張りがまた取れる）。返すのも鍵の中で行う。"""
+    import threading
+
+    pids = {"W": _dead_pid(), "B": _dead_pid() + 1}
+    real_getpid = os.getpid
+    monkeypatch.setattr(jw.os, "getpid", lambda: pids.get(threading.current_thread().name) or real_getpid())
+    lock = project / jw.WATCH_DIR / jw.LOCK
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(pids["W"]), encoding="utf-8")              # W の印（B からは死んだ見張りに見える）
+    w_checked, b_done = threading.Event(), threading.Event()
+    real_owns = jw._owns_lock
+
+    def owns(p: Path) -> bool:
+        value = real_owns(p)
+        if threading.current_thread().name == "W" and value:
+            w_checked.set()                                        # W は自分の印と見た。消す直前
+            b_done.wait(1.5)
+        return value
+
+    monkeypatch.setattr(jw, "_owns_lock", owns)
+    won: dict[str, bool] = {}
+
+    def claim() -> None:
+        won["B"] = jw._claim(project)
+        b_done.set()
+
+    w = threading.Thread(target=jw._release, args=(project,), name="W")
+    w.start()
+    assert w_checked.wait(5)
+    b = threading.Thread(target=claim, name="B")
+    b.start()
+    w.join(10)
+    b.join(10)
+    assert won["B"] is True
+    assert lock.read_text(encoding="utf-8") == str(pids["B"])      # B の印は残っている

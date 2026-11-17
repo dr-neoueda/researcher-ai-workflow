@@ -1116,3 +1116,64 @@ def test_one_broken_csv_row_does_not_break_the_quoted_cells_of_other_rows(tmp_pa
     p = tmp_path / "facts.csv"
     p.write_text('x,"1,234.5",0.5\ny,"abc"d,2.5\n', encoding="utf-8")
     assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "1234.5"), ("L1", "0.5"), ("L2", "2.5")]
+
+
+# ---------- Codex の確かめの周（2026-11-17、v2.4.2）----------
+
+@pytest.mark.parametrize("text", ["k = (1.2 ± 1) × 10⁻³", r"$k = (1.2 \pm 1) \times 10^{-3}$"])
+def test_an_integer_inside_parentheses_takes_the_shared_power(text: str) -> None:
+    """Codex v2.4.2 #3: 括弧の中の整数（± 1）を、共通の指数を当てる前に「整数」として捨て、誤差が 10 倍違っても一致にしていた。"""
+    assert _values(text) == ["1.2e-3", "1e-3"]
+
+
+def test_a_wrong_uncertainty_inside_parentheses_is_reported(tmp_path: Path) -> None:
+    code, out = _check(tmp_path, "k = (5.2 ± 1) × 10⁻³", "k = 0.0052\n誤差 = 0.0001")   # 誤差を 10 倍に書き違えた
+    assert code == 1 and "1×10^-3  ← 0.0001" in out and "そのまま一致: 1" in out
+
+
+def test_plain_integers_are_still_left_out_without_the_integers_flag() -> None:
+    assert _values("3 回測った（12 個）") == []
+    assert _values("(3 ± 1) 回") == []
+
+
+def test_one_broken_csv_row_does_not_split_a_multiline_cell_elsewhere(tmp_path: Path) -> None:
+    """Codex v2.4.2 #4: 壊れた行が 1 つあると全部の物理行を 1 行ずつ読み直し、正しく読めていた複数行のセル
+    "mass\\n1,234.5" を 1 と 234.5 に割っていた（誤った原稿の 234.5 が一致した）。"""
+    p = tmp_path / "facts.csv"
+    p.write_text('"mass\n1,234.5",mg\ny,"oops"x,0.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p, True)] == [("L1", "1234.5"), ("L3", "0.5")]
+    code, _out = _check(tmp_path, "mass = 234.5 mg", '"mass\n1,234.5",mg\ny,"oops"x,0.5', facts_name="facts.csv")
+    assert code == 1
+
+
+def test_rows_after_a_broken_row_keep_their_line_numbers(tmp_path: Path) -> None:
+    p = tmp_path / "facts.csv"
+    p.write_text('a,1.5\nb,"x"y,2.5\n"c\nd",3.5\ne,4.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [
+        ("L1", "1.5"), ("L2", "2.5"), ("L3", "3.5"), ("L5", "4.5")]
+
+
+def test_a_power_of_ten_with_exponent_zero_is_not_dropped_as_an_integer() -> None:
+    assert _values("k = 10^{0} M") == ["1e0"]
+
+
+def test_every_line_of_a_broken_multiline_record_is_read_again(tmp_path: Path) -> None:
+    p = tmp_path / "facts.csv"
+    p.write_text('"p 7.5\nq"r,1.5\ns,2.5\n', encoding="utf-8")       # 1〜2 行目の記録が壊れている
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "7.5"), ("L2", "1.5"), ("L3", "2.5")]
+
+
+@pytest.mark.parametrize("text", ["(n = 3; k = 1.2 ± 0.1) × 10⁻³", "(5 mg, 1.2 ± 0.1) × 10⁻³",
+                                  "(1.2 ± 0.1 for 3 runs) × 10⁻³"])
+def test_a_count_or_label_inside_parentheses_does_not_take_the_shared_power(text: str) -> None:
+    """python-reviewer（3 周目）M1: 括弧の中の件数・ラベル・単位の付いた整数（n = 3・5 mg）にも共通の指数を当て、
+    3×10⁻³ のような無い数を作って既定の実行を「一覧に無い」で落としていた。± や範囲でつながる整数だけに当てる。"""
+    assert _values(text) == ["1.2e-3", "0.1e-3"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("(5 ± 2) × 10⁻³", ["5e-3", "2e-3"]), ("(1–3) × 10⁻³", ["1e-3", "3e-3"]), ("(1 to 3) × 10⁻³", ["1e-3", "3e-3"]),
+    (r"$(1.2 \pm 1) \times 10^{-3}$", ["1.2e-3", "1e-3"]), ("(2) × 10³", []), ("(1, 2, 3) × 10⁻³", []),
+    ("k = 1.5 (n = 3) × 10⁻³", ["1.5e0"])])
+def test_integers_joined_by_a_plus_minus_or_a_range_take_the_shared_power(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected

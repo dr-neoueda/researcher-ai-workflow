@@ -135,6 +135,10 @@ _UNIT_AFTER = re.compile(  # 整数の直後に付いた単位（12mL・300K・5
     r"|min|wt|ppm|ppb|rpm|atm|Torr)(?![A-Za-z])"
 )
 _LETTERS = re.compile(r"[A-Za-z]*")
+# 括弧の共通の指数を当てる整数: ± や範囲で隣の数とつながっているもの（(5 ± 2)・(1–3)・(1 to 3)）。
+# 「n = 3」「5 mg」「3 runs」のような件数・ラベルは当てない（3×10⁻³ という無い数を作らない）
+_JOINED_BEFORE = re.compile(r"(?:[±∓]|\\pm|\\mp|\d\s*[-–—~〜]|\d\s+to)\s*$")
+_JOINED_AFTER = re.compile(r"\s*(?:[±∓]|\\pm|\\mp|[-–—~〜]\s*\d|to\s+\d)")
 INTEGER_ID = "英字が続く整数（識別子とみなした）"
 PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
@@ -396,8 +400,15 @@ def _skip_reason(match: re.Match[str], line: str) -> str:
     return ""
 
 
-def _read_one(match: re.Match[str], line: str, location: str, include_integers: bool) -> tuple[Number | None, str]:
-    """1 つの一致を数にする。読まないなら (None, 理由)。理由が空なら、挙げるまでもない（整数・前の数の続き）。"""
+def _is_bare_integer(number: Number, match: re.Match[str], line: str) -> bool:
+    """指数の付かない整数（--integers のときだけ照合する）。10⁰ のような 10 の累乗は整数として扱わない。"""
+    return (number.is_plain_integer and not number.unreadable and _exponent_text(match) is None
+            and not (match.group("mant") == "10" and _BARE_POWER.match(line, match.end())))
+
+
+def _read_one(match: re.Match[str], line: str, location: str) -> tuple[Number | None, str]:
+    """1 つの一致を数にする。読まないなら (None, 理由)。理由が空なら、挙げるまでもない（前の数の続き）。
+    整数もここでは読む（括弧や範囲の共通の指数が付くと整数でなくなるので、外すのは指数を当てた後）。"""
     reason = _skip_reason(match, line)
     if reason:
         return None, reason
@@ -410,11 +421,8 @@ def _read_one(match: re.Match[str], line: str, location: str, include_integers: 
     if power is not None:
         return power, ""
     number = _to_number(match, sign, location, bound)
-    if number.is_plain_integer and not number.unreadable and _exponent_text(match) is None:
-        if not include_integers:
-            return None, ""
-        if _is_ascii_letter(line[end : end + 1]) and not _UNIT_AFTER.match(line, end):
-            return None, INTEGER_ID
+    if _is_bare_integer(number, match, line) and _is_ascii_letter(line[end : end + 1]) and not _UNIT_AFTER.match(line, end):
+        return None, INTEGER_ID
     return number, ""
 
 
@@ -447,6 +455,10 @@ def _share_paren_powers(matches: list[re.Match[str]], read: list[tuple[Number | 
                 read[i] = (None, "")
             elif number is not None and not number.unreadable and number.exponent == 0 \
                     and group.start("inner") <= match.start() < group.end("inner"):
+                if _is_bare_integer(number, match, line) and not (
+                        _JOINED_BEFORE.search(line, group.start("inner"), match.start("mant"))
+                        or _JOINED_AFTER.match(line, match.end("mant"))):
+                    continue  # 件数・ラベルの整数は整数のまま（--integers の無いときは外れる）
                 text = f"{_fmt(number.mantissa)}×10^{exponent}"
                 read[i] = (dataclasses.replace(number, exponent=exponent, text=text), reason)
 
@@ -468,7 +480,7 @@ def extract_numbers(
     line = _DECIMAL_COMMA_NUMBER.sub(lambda m: " " * len(m.group(0)), line)
     pattern = _NUM_GROUPED if thousands else _NUM_PLAIN
     matches = list(pattern.finditer(line))
-    read = [_read_one(m, line, location, include_integers) for m in matches]
+    read = [_read_one(m, line, location) for m in matches]
     _consume_powers(matches, read, line)
     _share_paren_powers(matches, read, line)
     found: list[Number] = []
@@ -477,9 +489,11 @@ def extract_numbers(
         if shared is not None and not reason and (number is None or number.exponent == 0) and not (number and number.unreadable):
             base = number or _to_number(match, "" if match.group("sign") is None else (_sign_of(match, line)[0] or ""), location, None)
             number = dataclasses.replace(base, exponent=shared, text=f"{_fmt(base.mantissa)}×10^{shared}")
+        if number is not None and not include_integers and _is_bare_integer(number, match, line):
+            number = None  # 指数の付かないまま残った整数は --integers のときだけ
         if number is not None:
             found.append(number)
-        elif reason == INTEGER_ID and skipped is not None:
+        elif reason == INTEGER_ID and include_integers and skipped is not None:
             skipped.append(Skipped(location, match.group(0).strip() + _LETTERS.match(line, match.end()).group(0), reason))
         elif reason and skipped is not None and ("." in match.group("mant") or _exponent_text(match)):
             skipped.append(Skipped(location, match.group(0).strip(), reason))
@@ -603,17 +617,25 @@ def _strip_tex(line: str) -> str:
 
 def _table_lines(path: Path) -> list[tuple[str, str]]:
     """CSV・TSV をセルに分け、「 | 」でつないだ行にする（引用符の中の「1,234.5」は 1 つのセルのまま。
-    セルの区切りが消えるので、セルの中のカンマは桁区切りとして読める）。場所は行の始まりの行番号。"""
+    セルの区切りが消えるので、セルの中のカンマは桁区切りとして読める）。場所は記録の始まりの行番号。
+    壊れた記録（閉じていない引用符・引用符の後の字）は、その記録の行だけを 1 行ずつ読み直す
+    （残りの行を飲み込ませず、他の記録の複数行のセルも割らない）。"""
     text = path.read_text(encoding="utf-8-sig")
     delimiter = "," if path.suffix.lower() == ".csv" else "\t"
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
+    physical = io.StringIO(text, newline="").readlines()  # csv が数える行と同じ区切り（\r\n・\n・\r）
+    reader = csv.reader(physical, delimiter=delimiter, strict=True)
     out, start = [], 1
-    try:
-        for row in reader:
+    while True:
+        try:
+            row = next(reader)
+        except StopIteration:
+            break
+        except csv.Error:  # csv はその記録を捨てて次の行から読み続ける
+            out += [(f"L{i}", " | ".join(_table_row(physical[i - 1].rstrip("\r\n"), delimiter)))
+                    for i in range(start, reader.line_num + 1)]
+        else:
             out.append((f"L{start}", " | ".join(row)))
-            start = reader.line_num + 1
-    except csv.Error:  # 閉じていない引用符など: 残りの行を飲み込ませず、1 行ずつ読み直す（壊れた行だけ区切りで分ける）
-        out = [(f"L{i}", " | ".join(_table_row(line, delimiter))) for i, line in enumerate(text.splitlines(), start=1)]
+        start = reader.line_num + 1
     return out
 
 
