@@ -139,9 +139,14 @@ _LETTERS = re.compile(r"[A-Za-z]*")
 # 数と ± や範囲の間の単位は許す。つながらない整数（1.2345(6) × 10³ の標準不確かさ・「n = 3」「試料 3 回」の件数・
 # (2023) のような番号）には当てない（6×10³ という無い数を作らない）。「and」は件数もつなぐ（12 mg and 3 runs）のでつなぎにしない
 _PLUS_MINUS = r"(?:[±∓]|\\pm|\\mp|\+\s*/?\s*-)"  # ±・\pm・+/-・+-
-_UNIT_WORD = r"(?:[A-Za-zµμ°%Å]+\s*)?"
-_JOINED_BEFORE = re.compile(rf"(?:{_PLUS_MINUS}|\d\s*{_UNIT_WORD}(?:[-–—~〜−]|to\b))\s*[-+−–]?\s*$")
-_JOINED_AFTER = re.compile(rf"\s*{_UNIT_WORD}(?:{_PLUS_MINUS}|[-–—~〜−]\s*\d|to\s+\d)")
+# 数と ± や範囲の間に挟む単位: 1 語（mg・%・L-1・mL^-1・m^{2}。上付きは normalize で ^ に直してある）か、
+# それを / · * や空白でつないだもの（mg/mL・mol L-1・mol·L^-1・g cm^-3。Codex r2: mg/mL を挟むと左端に指数が当たらなかった）
+_UNIT_ATOM = r"[A-Za-zµμ°%Å]+(?:\^?\{?[-−]?\d+\}?)?"
+_UNIT_WORD = rf"(?:{_UNIT_ATOM}(?:\s*[/·⋅∙*]\s*{_UNIT_ATOM}|\s+{_UNIT_ATOM}){{0,3}}\s*)?"
+# 範囲のダッシュ。英字にくっついたハイフン・マイナス（L-1・cm-3）は単位の指数なので範囲にしない
+_RANGE_JOIN = r"(?:[–—~〜]|(?<![A-Za-zµμ°%Å])[-−])"
+_JOINED_BEFORE = re.compile(rf"(?:{_PLUS_MINUS}|\d\s*{_UNIT_WORD}(?:{_RANGE_JOIN}|to\b))\s*[-+−–]?\s*$")
+_JOINED_AFTER = re.compile(rf"\s*{_UNIT_WORD}(?:{_PLUS_MINUS}|{_RANGE_JOIN}\s*\d|to\s+\d)")
 INTEGER_ID = "英字が続く整数（識別子とみなした）"
 PRECISION = 2 * MAX_EXPONENT + 100  # 一覧の値を丸めずに比べる桁数（Decimal の既定の 28 桁で先に丸めない）
 _DOTTED = re.compile(r"\.\d")
@@ -489,9 +494,9 @@ def extract_numbers(
     found: list[Number] = []
     for i, (match, (number, reason)) in enumerate(zip(matches, read)):
         shared = _range_exponent(match, matches[i + 1] if i + 1 < len(matches) else None, read[i + 1][0] if i + 1 < len(read) else None, line)
-        if shared is not None and not reason and (number is None or number.exponent == 0) and not (number and number.unreadable):
-            base = number or _to_number(match, "" if match.group("sign") is None else (_sign_of(match, line)[0] or ""), location, None)
-            number = dataclasses.replace(base, exponent=shared, text=f"{_fmt(base.mantissa)}×10^{shared}")
+        if shared is not None and number is not None and number.exponent == 0 and not number.unreadable:
+            # 読んだ数だけに共有する（読まないと決めた s^-1 の 1・版番号 2.0.1 の .1 を起こして 1×10³ を作らない）
+            number = dataclasses.replace(number, exponent=shared, text=f"{_fmt(number.mantissa)}×10^{shared}")
         if number is not None and not include_integers and _is_bare_integer(number, match, line):
             number = None  # 指数の付かないまま残った整数は --integers のときだけ
         if number is not None:

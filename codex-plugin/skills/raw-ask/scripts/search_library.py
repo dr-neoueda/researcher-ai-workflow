@@ -16,6 +16,7 @@ raw-register が作った要約 md（frontmatter に title・authors・year・do
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import math
 import re
@@ -285,6 +286,8 @@ def _eight_bit(data: bytes) -> tuple[str | None, str]:
         pass
     damaged = data.decode("utf-8", errors="replace")
     bad = damaged.count("\ufffd")
+    if _cut_off_utf8(data):
+        return damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）"
     if bad <= UTF8_DAMAGE_SHARE * sum(1 for b in data if b >= 0x80):
         return damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）"
     try:
@@ -296,6 +299,18 @@ def _eight_bit(data: bytes) -> tuple[str | None, str]:
     if bad <= max(_cp932_oddities(sjis), wide):
         return damaged, f"UTF-8（壊れた文字 {bad} 個を置き換えた）"
     return sjis, "Shift_JIS（cp932）"
+
+
+def _cut_off_utf8(data: bytes) -> bool:
+    """末尾で字の途中で切れたほかは正しい UTF-8 か（É・Δ・α の UTF-8 が cp932 でも読めてしまう短い文を、cp932 にしない）。
+    Codex r2: 「# Étude …」の最後が 0xC3 だと cp932 で「ﾃ液ude」と読め、不自然な字にも数えられず cp932 に落ちていた。
+    取り違えるのは、末尾が改行の無い半角カナで、ほかの非 ASCII が UTF-8 の字の形に並んだ Shift_JIS だけ（ﾃｽﾄ で終わる等）。"""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        decoder.decode(data, final=False)
+    except UnicodeDecodeError:
+        return False
+    return bool(decoder.getstate()[0])
 
 
 def _cp932_oddities(text: str) -> int:

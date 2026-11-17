@@ -542,6 +542,28 @@ def test_utf8_cut_off_in_the_middle_of_a_character_stays_utf8(tmp_path: Path, da
 
 
 
+@pytest.mark.parametrize("title,query", [("Étude", "Étude"), ("Phase α", "α"), ("ΔG and ΔH", "ΔG")])
+def test_utf8_cut_off_at_the_end_of_the_file_stays_utf8(tmp_path: Path, title: str, query: str) -> None:
+    """Codex（確かめの周 r2）P2: 末尾で字の途中で切れた UTF-8（最後が 0xC3）で、É（C3 89）・Δ（CE 94）が cp932 では
+    「半角カナ＋次の英字を食った漢字」（ﾃ液ude）、α（CE B1）は英字にくっつかない半角カナの対になり、不自然な字に数えられず
+    cp932 に落ちて探せなかった。末尾の切れた 1 字のほかは正しい UTF-8 なら、切れた UTF-8 とする。"""
+    papers, hits = _one(tmp_path, f"# {title}\n\n## Results\nYield: 85 %\n".encode() + b"\xc3", query)
+    assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8") and hits
+
+
+@pytest.mark.parametrize("data,cut", [(b"# \xc3\x89tude", False), (b"# \xc3\x89tude\xc3", True), (b"# \xe7\xb5\x90\xe6", True),
+                                      (b"\xb8# \xc3", False), (b"", False)])
+def test_cut_off_utf8_is_only_an_unfinished_last_character(data: bytes, cut: bool) -> None:
+    assert sl._cut_off_utf8(data) is cut
+
+
+def test_shift_jis_ending_in_a_kana_without_a_newline_stays_shift_jis(tmp_path: Path) -> None:
+    """末尾が UTF-8 の字の途中に見えても（ﾃ = 0xC3）、ほかに UTF-8 として読めないところがあれば切れた UTF-8 ではない。"""
+    path = tmp_path / "paper.md"
+    path.write_bytes("# ﾏｲｸﾛ波ﾃ".encode("cp932"))
+    assert sl._read_text(path) == ("# ﾏｲｸﾛ波ﾃ", "Shift_JIS（cp932）")
+
+
 @pytest.mark.parametrize("text", ["# \ue000\ue001 data\n", "ID: \ue000\ue001\ue002\ue003\n", "# PCﾃﾞｰﾀPC\n", "# XRDﾌｧｲﾙXRD\n",
                                   "# Aｲ\n", "# PCﾒﾓPC\n"])
 def test_short_shift_jis_with_gaiji_or_kana_between_latin_letters_stays_shift_jis(tmp_path: Path, text: str) -> None:

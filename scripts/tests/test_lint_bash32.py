@@ -111,3 +111,13 @@ def test_a_finding_says_how_to_fix_it(tmp_path: Path) -> None:
     root = _repo(tmp_path, {"a.sh": BAD})
     res = _lint(root)
     assert res.returncode == 1 and "${" in res.stdout and "\\$" in res.stdout   # 展開なら ${…}、文字どおりなら \$…
+
+
+@pytest.mark.parametrize("line", ['v=`echo "\\$X）"`', 'eval "echo \\$X）"', '/bin/bash -uc "X=ok; echo \\$X）"'])
+def test_an_escaped_dollar_that_is_parsed_again_is_still_caught(tmp_path: Path, line: str) -> None:
+    """Codex（確かめの周 r2）P2: バッククォートの中では \\$ の \\ が外れてから中のコマンドが読まれ、$X） が展開されて落ちる。
+    eval・sh -c も文字列をもう一度読むので同じ。これらの行では \\ の数で「文字どおり」と決めない。"""
+    root = _repo(tmp_path, {"a.sh": f"set -u\nX=ok\n{line}\n"})
+    assert _bash32_fails(root / "a.sh")
+    res = _lint(root)
+    assert res.returncode == 1 and "a.sh:3:" in res.stdout

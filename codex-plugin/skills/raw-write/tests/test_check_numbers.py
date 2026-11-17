@@ -879,6 +879,16 @@ def test_a_range_shares_the_exponent_of_its_right_end(text: str, expected: list[
     assert _values(text) == expected
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("k = 2.1 s^-1 to 3.2 × 10^3 s^-1", ["2.1e0", "3.2e3"]), ("k = 2.1 s⁻¹ – 3.2 × 10³ s⁻¹", ["2.1e0", "3.2e3"]),
+    ("(5.1 kJ mol^-1 to 7.2 kJ mol^-1) × 10^3", ["5.1e3", "7.2e3"]), ("R^2 – 3 × 10^-3", ["3e-3"])])
+def test_a_range_does_not_revive_a_unit_power(text: str, expected: list[str]) -> None:
+    """r2 の直しの途中で見つけた（v2.4.1 から）: 範囲の左端が右端の指数を共有するとき、読まないと決めた上付きの整数
+    （s^-1 の 1・R^2 の 2）まで起こし、1×10³ や 0.002 という無い数を作っていた。読んだ数だけに指数を共有する。"""
+    assert _values(text) == expected
+    assert _values(text, include_integers=True) == expected
+
+
 @pytest.mark.parametrize("text,expected", [("0.1234-5-6", ["0.1234e0"]), ("(see [a](0.5/0.3))", ["0.5e0", "0.3e0"])])
 def test_noise_patterns_do_not_eat_decimals(text: str, expected: list[str]) -> None:
     assert _values(text)[: len(expected)] == expected
@@ -1179,7 +1189,13 @@ def test_a_count_or_label_inside_parentheses_does_not_take_the_shared_power(text
     ("(5 mg ± 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 − 2) × 10^3", ["5e3", "2e3"]),
     ("(5 mg +/- 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 mg ± -2 mg) × 10^3", ["5e3", "-2e3"]),
     # python-reviewer（5 周目）M3: 単位を挟む範囲は両側とも
-    ("(5 mg - 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 mg ~ 8 mg) × 10^3", ["5e3", "8e3"]), ("(5 mg to 6 mg) × 10^3", ["5e3", "6e3"])])
+    ("(5 mg - 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 mg ~ 8 mg) × 10^3", ["5e3", "8e3"]), ("(5 mg to 6 mg) × 10^3", ["5e3", "6e3"]),
+    # Codex（確かめの周 r2）P2: 組み立てた単位（mg/mL・mg mL⁻¹・mol L-1・mol·L⁻¹・g cm⁻³・m²）を挟んでもつながる
+    ("(5 mg/mL ± 2 mg/mL) × 10^-3", ["5e-3", "2e-3"]), ("(5 mg mL⁻¹ ± 2 mg mL⁻¹) × 10^-3", ["5e-3", "2e-3"]),
+    ("(5 mol L-1 ± 2 mol L-1) × 10^-3", ["5e-3", "2e-3"]), ("(5 mol·L⁻¹ ± 2 mol·L⁻¹) × 10^-3", ["5e-3", "2e-3"]),
+    ("(5 g cm⁻³ ± 2 g cm⁻³) × 10^-3", ["5e-3", "2e-3"]), ("(5 m² ± 2 m²) × 10^-3", ["5e-3", "2e-3"]),
+    ("(5 kJ/mol – 7 kJ/mol) × 10^3", ["5e3", "7e3"]),
+    ("(5 kJ mol^-1 to 7 kJ mol^-1) × 10^3", ["5e3", "7e3"]), ("(5 µg/mL ~ 7 µg/mL) × 10^3", ["5e3", "7e3"])])
 def test_integers_joined_by_a_plus_minus_or_a_range_take_the_shared_power(text: str, expected: list[str]) -> None:
     assert _values(text) == expected
     assert _values(text, include_integers=True) == expected
@@ -1194,7 +1210,9 @@ def test_a_count_alone_in_parentheses_before_a_power_stays_an_integer() -> None:
 @pytest.mark.parametrize("text", [
     "V = 1.2345(6) × 10^3 Å^3", "ρ = 1.234(5) × 10⁻³ g cm⁻³", "k = 3.2(1) × 10^-3 s^-1",    # 結晶学の標準不確かさの書き方
     "(試料 3 回) × 10^3", "(α = 3) × 10^3", "(3σ, 5) × 10^3", "(2023) × 10^3", "yield (85) × 10^-2",
-    "(2) × 10³", "(1, 2, 3) × 10⁻³", "(1 and 2) × 10^3", "(12 mg and 3 runs) × 10^3"])
+    "(2) × 10³", "(1, 2, 3) × 10⁻³", "(1 and 2) × 10^3", "(12 mg and 3 runs) × 10^3",
+    # r2 で単位を組み立てたものに広げた後も、カンマ・and・= を挟めば件数のまま
+    "(12 mg/mL and 3 runs) × 10^3", "(n = 3 mg/mL, 1.2 ± 0.1) × 10⁻³", "(3 mol L-1, 2 g cm⁻³) × 10^3"])
 def test_an_integer_not_joined_by_a_plus_minus_or_a_range_does_not_take_the_shared_power(text: str) -> None:
     """python-reviewer（5 周目）M1・M2: 4 周目の「語の無い括弧ならどの整数にも当てる」が、1.2345(6) × 10³ の (6) に当たって
     6×10³ という無い数を作り、日本語・ギリシャ文字の語も「語なし」と数えていた。± や範囲でつながる整数だけに当てる。"""
