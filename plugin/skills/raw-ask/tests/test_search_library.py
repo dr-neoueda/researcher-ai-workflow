@@ -371,12 +371,16 @@ def test_a_japanese_utf16_file_with_a_bom_is_searchable(tmp_path: Path) -> None:
     assert hits and hits[0].paper.title == "結晶構造の研究"
 
 
-def test_a_japanese_utf16_file_without_a_bom_is_unreadable_not_garbage(tmp_path: Path) -> None:
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_a_japanese_utf16_file_without_a_bom_is_searchable_not_garbage(tmp_path: Path, encoding: str) -> None:
+    """NUL が少なく（日本語が多い）BOM も無い UTF-16。cp932 では NUL まじりの化けた字に読めてしまうので、
+    NUL のバイトの位置で UTF-16 として読む（Codex #72: 以前は「読めない」に数え、探せなかった）。"""
     lib = tmp_path / "md"
     lib.mkdir()
-    (lib / "ja16.md").write_bytes(JAPANESE.encode("utf-16-le"))  # cp932 では NUL まじりの化けた字に読めてしまう
+    (lib / "ja16.md").write_bytes(JAPANESE.encode(encoding))
     papers, unreadable = sl.load_library_report(lib)
-    assert papers == [] and [p.name for p in unreadable] == ["ja16.md"]
+    assert unreadable == [] and [p.title for p in papers] == ["結晶構造の研究"]
+    assert papers[0].encoding_note == "UTF-16"
 
 
 def test_a_utf16_file_is_listed_for_resaving(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -428,3 +432,144 @@ def test_the_doi_link_prefix_is_not_indexed(tmp_path: Path) -> None:
     (lib / "d.md").write_text("---\ntitle: T\ndoi: https://doi.org/10.1/xyz\n---\n# T\n\n## 本文\nzeolite\n", encoding="utf-8")
     papers = sl.load_library(lib)
     assert sl.search(papers, ["https"]) == [] and sl.search(papers, ["10.1/xyz"])
+
+
+# ---------- Codex の事後レビュー（2026-11-17）----------
+
+def _one(tmp_path: Path, data: bytes, query: str) -> tuple[list[sl.Paper], list[sl.Hit]]:
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "paper.md").write_bytes(data)
+    papers = sl.load_library(lib)
+    return papers, sl.search(papers, [query])
+
+
+def test_a_bomless_utf16_that_also_decodes_as_utf8_is_read_as_utf16(tmp_path: Path) -> None:
+    """Codex #72: 日本語の多い BOM の無い UTF-16 は NUL が 2 割ほどで UTF-16 の判定を通らず、しかも UTF-8 として
+    読めてしまい（NUL と制御文字の列）、黙って探せなかった。"""
+    papers, hits = _one(tmp_path, "# 分子結晶\n\n## 分子結晶\n分子結晶\n".encode("utf-16-le"), "分子結晶")
+    assert hits and papers[0].title == "分子結晶" and papers[0].encoding_note == "UTF-16"
+
+
+def test_one_broken_byte_in_a_short_utf8_file_does_not_turn_it_into_shift_jis(tmp_path: Path) -> None:
+    """Codex #72: 非 ASCII の少ない UTF-8 は、壊れた 1 バイトで 5% を超え、cp932 で化けた字に読んでいた。"""
+    papers, hits = _one(tmp_path, "# 結晶\n".encode("utf-8") + b"\xff", "結晶")
+    assert hits and papers[0].title == "結晶" and papers[0].encoding_note.startswith("UTF-8")
+
+
+def test_yaml_escapes_in_a_double_quoted_title_are_decoded(tmp_path: Path) -> None:
+    data = '---\ntitle: "\\u5206\\u5b50\\u7d50\\u6676 \\"MOF\\""\n---\n# 本文の題\n\n## 結果\n85 %\n'.encode()
+    papers, hits = _one(tmp_path, data, "分子結晶")
+    assert papers[0].title == '分子結晶 "MOF"' and hits
+
+
+def test_the_body_heading_is_searchable_even_when_the_frontmatter_has_a_title(tmp_path: Path) -> None:
+    """Codex #72: frontmatter の題名があると本文の # 見出しが索引から消えていた。"""
+    data = "---\ntitle: Short name\n---\n# 分子結晶の固相反応\n\n## 結果\n85 %\n".encode()
+    _papers, hits = _one(tmp_path, data, "固相反応")
+    assert hits
+
+
+@pytest.mark.parametrize("front", [
+    "tags: mof\nkeywords: [zeolite]\n",
+    "keywords: [zeolite]\ntags: mof\n",
+    "tags: mof\nkeywords:\n  - zeolite\n",
+])
+def test_a_scalar_tag_and_a_list_of_keywords_are_merged(tmp_path: Path, front: str) -> None:
+    """Codex #72: tags が文字列で keywords がリストだと、後の方を黙って捨てていた。"""
+    papers, hits = _one(tmp_path, f"---\ntitle: Example\n{front}---\n# Example\n".encode(), "zeolite")
+    assert set(papers[0].tags) == {"mof", "zeolite"} and hits
+
+
+def test_a_word_only_in_a_section_heading_is_searchable(tmp_path: Path) -> None:
+    """Codex #72: 節の見出し（## Zeolite synthesis）が索引に入らず、見出しにだけある対象名で探せなかった。"""
+    _papers, hits = _one(tmp_path, b"# Example\n\n## Zeolite synthesis\nYield: 85 %\n", "zeolite")
+    assert hits and hits[0].section == "Zeolite synthesis"
+
+
+# ---------- python-reviewer（v2.4.2 の 1 周目）----------
+
+def test_an_escape_beyond_unicode_does_not_stop_the_search(tmp_path: Path) -> None:
+    """HIGH: \\U の 8 桁が Unicode の外（0x110000 以上）だと chr() が ValueError を上げ、1 本のために検索全体が落ちた。"""
+    lib = tmp_path / "md"
+    lib.mkdir()
+    (lib / "bad.md").write_text('---\ntitle: "C:\\UDEADBEEF zeolite"\n---\n# x\n', encoding="utf-8")
+    (lib / "good.md").write_text("# good zeolite\n", encoding="utf-8")
+    papers = sl.load_library(lib)
+    assert {h.paper.path.stem for h in sl.search(papers, ["zeolite"])} == {"bad", "good"}
+    assert next(p for p in papers if p.path.stem == "bad").title == "C:\\UDEADBEEF zeolite"
+
+
+@pytest.mark.parametrize("heading,query", [("## Summary", "summary"), ("## 主要な結果（数値・数式・図表要点すべて）", "数式"),
+                                           ("## 手法（詳細）", "詳細"), ("## Results", "results")])
+def test_template_section_headings_are_not_indexed(tmp_path: Path, heading: str, query: str) -> None:
+    """MEDIUM: 要約の決まった見出し（Summary・主要な結果…）を索引に入れると、その語の問いが全部の論文に当たる。"""
+    lib = tmp_path / "md"
+    lib.mkdir()
+    for name in ("a", "b"):
+        (lib / f"{name}.md").write_text(f"# Paper {name}\n\n{heading}\nnothing here\n", encoding="utf-8")
+    assert sl.search(sl.load_library(lib), [query]) == []
+
+
+# ---------- Codex の確かめの周（2026-11-17、v2.4.2）----------
+
+def test_half_width_katakana_in_shift_jis_is_not_read_as_broken_utf8(tmp_path: Path) -> None:
+    """Codex v2.4.2 #5: cp932 の半角カナ（ﾏｲ = CF B2）は偶然 2 バイトの UTF-8 の字になり、「壊れた字より正しい字が多い」
+    の条件で壊れた UTF-8 と決め、題名が化けて探せなかった（v2.4.1 までは cp932 で読めていた）。"""
+    papers, hits = _one(tmp_path, "# ﾏｲｸﾛ波\n\n## Results\nYield: 85 %\n".encode("cp932"), "マイクロ波")
+    assert papers[0].title == "ﾏｲｸﾛ波" and papers[0].encoding_note == "Shift_JIS（cp932）" and hits
+
+
+@pytest.mark.parametrize("title", ["Müller", "Étude de l'été", "αβγδ", "Привет мир"])
+def test_one_broken_byte_in_a_short_latin_utf8_file_is_still_utf8(tmp_path: Path, title: str) -> None:
+    """python-reviewer（3 周目）M2: 2 バイトの字を証拠に数えなくしたため、ラテン・ギリシャ・キリルの短い UTF-8 が
+    1 バイトの壊れで cp932 に落ちて化けた。cp932 でも損なわずには読めないときは、2 バイトの字も UTF-8 の証拠に数える。"""
+    papers, _hits = _one(tmp_path, f"# {title}\n".encode("utf-8") + b"\xff", "x")
+    assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8")
+
+
+@pytest.mark.parametrize("data,title", [
+    ("# café résumé naïve Müller Zürich\n".encode() + "é".encode()[:1], "café résumé naïve Müller Zürich"),
+    ("# éaè".encode()[:-1] + b"\n", "éa�"),
+    ("# 結晶\n".encode() + "あ".encode()[:2], "結晶"),
+])
+def test_utf8_cut_off_in_the_middle_of_a_character_stays_utf8(tmp_path: Path, data: bytes, title: str) -> None:
+    """python-reviewer（4 周目）H1: ラテン文字の UTF-8 が字の途中で切れる（最後が 0xC3）と、cp932 でも損なわずに読めるので
+    cp932 に落ち「cafﾃｩ」と化けた。cp932 の読みに不自然な字（私用の字・英字にくっついた半角カナ）が UTF-8 の壊れた字と
+    同じかそれより多ければ UTF-8 とする。"""
+    papers, _hits = _one(tmp_path, data, "x")
+    assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8")
+
+
+
+@pytest.mark.parametrize("title,query", [("Étude", "Étude"), ("Phase α", "α"), ("ΔG and ΔH", "ΔG")])
+def test_utf8_cut_off_at_the_end_of_the_file_stays_utf8(tmp_path: Path, title: str, query: str) -> None:
+    """Codex（確かめの周 r2）P2: 末尾で字の途中で切れた UTF-8（最後が 0xC3）で、É（C3 89）・Δ（CE 94）が cp932 では
+    「半角カナ＋次の英字を食った漢字」（ﾃ液ude）、α（CE B1）は英字にくっつかない半角カナの対になり、不自然な字に数えられず
+    cp932 に落ちて探せなかった。末尾の切れた 1 字のほかは正しい UTF-8 なら、切れた UTF-8 とする。"""
+    papers, hits = _one(tmp_path, f"# {title}\n\n## Results\nYield: 85 %\n".encode() + b"\xc3", query)
+    assert papers[0].title == title and papers[0].encoding_note.startswith("UTF-8") and hits
+
+
+@pytest.mark.parametrize("data,cut", [(b"# \xc3\x89tude", False), (b"# \xc3\x89tude\xc3", True), (b"# \xe7\xb5\x90\xe6", True),
+                                      (b"\xb8# \xc3", False), (b"", False)])
+def test_cut_off_utf8_is_only_an_unfinished_last_character(data: bytes, cut: bool) -> None:
+    assert sl._cut_off_utf8(data) is cut
+
+
+def test_shift_jis_ending_in_a_kana_without_a_newline_stays_shift_jis(tmp_path: Path) -> None:
+    """末尾が UTF-8 の字の途中に見えても（ﾃ = 0xC3）、ほかに UTF-8 として読めないところがあれば切れた UTF-8 ではない。"""
+    path = tmp_path / "paper.md"
+    path.write_bytes("# ﾏｲｸﾛ波ﾃ".encode("cp932"))
+    assert sl._read_text(path) == ("# ﾏｲｸﾛ波ﾃ", "Shift_JIS（cp932）")
+
+
+@pytest.mark.parametrize("text", ["# \ue000\ue001 data\n", "ID: \ue000\ue001\ue002\ue003\n", "# PCﾃﾞｰﾀPC\n", "# XRDﾌｧｲﾙXRD\n",
+                                  "# Aｲ\n", "# PCﾒﾓPC\n"])
+def test_short_shift_jis_with_gaiji_or_kana_between_latin_letters_stays_shift_jis(tmp_path: Path, text: str) -> None:
+    """python-reviewer（5 周目）M4・L1: 外字（私用の字に読む cp932 の正しい字）や、英字に挟まれた半角カナの語を
+    「不自然な字」と数え、短い Shift_JIS を壊れた UTF-8 にしていた。不自然な字は、読めないバイトの代わりの字と、
+    UTF-8 の é・ü が化けた形（先頭のバイトのカナ＋続きのバイトのカナ）が英字にくっついたものだけにする。"""
+    path = tmp_path / "paper.md"
+    path.write_bytes(text.encode("cp932"))
+    assert sl._read_text(path) == (text, "Shift_JIS（cp932）")

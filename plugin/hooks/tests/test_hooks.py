@@ -292,11 +292,20 @@ def test_patch_lines_inside_written_content_are_ignored(project: Path) -> None:
     assert res.returncode == 0 and res.stderr == ""
 
 
-def test_quoted_patch_paths_are_unquoted(project: Path) -> None:
+def test_quotes_in_a_patch_path_are_part_of_the_name(project: Path) -> None:
+    """Codex #70: Codex 0.167 の apply_patch は引用符も名前の一部として書く（実機の apply で確認）。
+    「"office/…"」は根に「"office」というフォルダを作るので office/ の置き違いではない。"""
     patch = '*** Begin Patch\n*** Add File: "office/research/papers/a b.md"\n*** End Patch\n'
     payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"command": patch}}
     res = run_hook("output-location-check.sh", payload, cwd=project)
-    assert res.returncode == 2 and "work/papers/a b.md" in res.stderr
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_a_trailing_apostrophe_stays_in_the_reported_name(project: Path) -> None:
+    patch = "*** Begin Patch\n*** Add File: office/research/papers/a.md'\n+x\n*** End Patch\n"
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"command": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "office/research/papers/a.md' → work/papers/a.md'" in res.stderr
 
 
 def test_a_stray_office_folder_above_is_not_the_project(tmp_path: Path) -> None:
@@ -544,3 +553,140 @@ def test_an_empty_list_of_old_places_scans_nothing(project: Path, monkeypatch: p
     monkeypatch.setenv("RAW_LEGACY_PLACES", "  \n")
     data = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "ls"}}
     assert _hookio.edited_paths(data, project) == []
+
+
+# ---------- Codex の事後レビュー（2026-11-17）----------
+
+def _crlf_python(tmp_path: Path) -> str:
+    """Windows の Python のように標準出力の改行を CRLF にする「python3」を置いた PATH。"""
+    bindir = tmp_path / "bin-crlf"
+    bindir.mkdir()
+    wrapper = bindir / "python3"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import os, runpy, sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == '-c':\n"
+        "    os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n"
+        "sys.stdout.reconfigure(newline='\\r\\n')\n"
+        "sys.argv = sys.argv[1:]\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return f"{bindir}{os.pathsep}{os.environ['PATH']}"
+
+
+def test_a_crlf_python_still_finds_the_project(project: Path, tmp_path: Path) -> None:
+    """Codex #70 P1: Windows の Python の標準出力の CRLF が project のパスに残り（bash の $(…) は LF だけ外す）、
+    記録の読み込みと Stop の催促が黙って抜けていた。"""
+    (project / "office" / "secretary" / "notes" / f"{_today()}-decisions.md").write_text("- 決めた\n", encoding="utf-8")
+    env = {"PATH": _crlf_python(tmp_path)}
+    stop = run_hook("learnings-reminder.sh", {"cwd": str(project)}, cwd=project, extra_env=env)
+    assert stop.returncode == 2 and "learnings" in stop.stderr
+    start = run_hook("load-playbooks.sh", {"cwd": str(project)}, cwd=project, extra_env=env)
+    assert "決めた" in start.stdout
+
+
+def test_a_crlf_python_reports_paths_without_a_carriage_return(project: Path, tmp_path: Path) -> None:
+    target = project / "office" / "research" / "papers" / "a.md"
+    payload = {"cwd": str(project), "tool_name": "Write", "tool_input": {"file_path": str(target)}}
+    res = run_hook("output-location-check.sh", payload, cwd=project, extra_env={"PATH": _crlf_python(tmp_path)})
+    assert res.returncode == 2 and "office/research/papers/a.md → work/papers/a.md\n" in res.stderr
+    assert "\r" not in res.stderr
+
+
+def test_a_file_added_then_deleted_in_one_patch_is_not_reported(project: Path) -> None:
+    patch = ("*** Begin Patch\n*** Add File: office/research/papers/t.md\n+x\n"
+             "*** Delete File: office/research/papers/t.md\n*** End Patch\n")
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"command": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_a_file_deleted_then_added_again_in_one_patch_is_reported(project: Path) -> None:
+    patch = ("*** Begin Patch\n*** Delete File: office/research/papers/t.md\n"
+             "*** Add File: office/research/papers/t.md\n+x\n*** End Patch\n")
+    payload = {"cwd": str(project), "tool_name": "apply_patch", "tool_input": {"command": patch}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "work/papers/t.md" in res.stderr
+
+
+@pytest.mark.parametrize("hook,check", [
+    ("learnings-reminder.sh", lambda res: res.returncode == 2),
+    ("load-playbooks.sh", lambda res: "office/ 検出済" in res.stdout),
+])
+def test_without_python_a_subfolder_still_finds_the_project(project: Path, tmp_path: Path, hook: str, check) -> None:
+    """Codex #70: python が無く CLAUDE_PROJECT_DIR も無いとき（Codex）、<project>/work で起動すると
+    いまの場所しか見ず、SessionStart と Stop が黙っていた。"""
+    (project / "office" / "secretary" / "notes" / f"{_today()}-decisions.md").write_text("- 決めた\n", encoding="utf-8")
+    sub = project / "work"
+    env = {"PATH": _path_without_python(tmp_path), "LANG": "en_US.UTF-8"}
+    res = subprocess.run([env["PATH"] + "/bash", str(HOOKS / hook)], input=json.dumps({"cwd": str(sub)}),
+                         capture_output=True, text=True, cwd=sub, env=env, timeout=30)
+    assert check(res), (res.returncode, res.stdout, res.stderr)
+
+
+def test_an_old_place_linked_to_its_work_place_is_not_a_violation(project: Path) -> None:
+    """Codex #73: office/research/papers が work/papers へのリンクなら、正しい場所に書いたことになる。"""
+    (project / "work" / "papers").mkdir(parents=True)
+    (project / "office" / "research").mkdir(parents=True)
+    (project / "office" / "research" / "papers").symlink_to(project / "work" / "papers", target_is_directory=True)
+    (project / "work" / "papers" / "new.md").write_text("x\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "true"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 0 and res.stderr == ""
+
+
+def test_a_file_dated_in_the_future_is_not_reported_forever(project: Path) -> None:
+    """Codex #73: 時計の進んだ機械から更新時刻ごと写したファイルを、120 秒を過ぎても毎回拾っていた。"""
+    sys.path.insert(0, str(HOOKS))
+    import _hookio
+    target = project / "office" / "research" / "papers" / "future.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("x\n", encoding="utf-8")
+    tomorrow = time.time() + 86400
+    os.utime(target, (tomorrow, tomorrow))
+    later = time.time() + 2 * _hookio.RECENT_SECONDS
+    assert _hookio.recent_office_files(project, now=later, places=["office/research/papers"]) == []
+    assert _hookio.recent_office_files(project, places=["office/research/papers"]) == ["office/research/papers/future.md"]
+
+
+def test_a_file_name_with_a_newline_is_reported_whole(project: Path) -> None:
+    target = project / "office" / "research" / "papers" / "a\nb.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("x\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "true"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "office/research/papers/a\\nb.md → work/papers/a\\nb.md" in res.stderr
+
+
+def test_a_job_submitted_while_stop_was_holding_still_gets_a_watcher(project: Path, tmp_path: Path) -> None:
+    """Codex #71: Stop に引き戻された間（stop_hook_active）に投入したジョブには、次の Stop が起動まで
+    たどり着かずに終わるので見張りが付かなかった（Codex の sandbox では hook だけが起動できる）。"""
+    live, env = _live_job_and_fake_tmux(project, tmp_path)
+    try:
+        res = run_hook("jobs-stop-check.sh", {"cwd": str(project), "stop_hook_active": True}, cwd=project, extra_env=env)
+        assert res.returncode == 0 and res.stderr == ""            # 引き戻しは繰り返さない
+        assert _heartbeat_written(project)                          # が、見張りは起動する
+    finally:
+        _stop_watcher(project, live, tmp_path)
+
+
+def test_a_file_a_little_in_the_future_on_a_shared_drive_is_still_caught(project: Path) -> None:
+    """LOW: 時計の進んだ共有のドライブ（NFS・同期フォルダ）では、いま書いたファイルの時刻が数秒〜数分先になる。"""
+    sys.path.insert(0, str(HOOKS))
+    import _hookio
+    target = project / "office" / "research" / "papers" / "nfs.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("x\n", encoding="utf-8")
+    behind = time.time() - 60                                   # 手元の時計がサーバより 60 秒遅い（mtime も ctime も 60 秒先に見える）
+    assert _hookio.recent_office_files(project, now=behind, places=["office/research/papers"]) == ["office/research/papers/nfs.md"]
+
+
+def test_a_backslash_in_a_name_is_shown_as_it_is(project: Path) -> None:
+    target = project / "office" / "research" / "papers" / "a\\b.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("x\n", encoding="utf-8")
+    payload = {"cwd": str(project), "tool_name": "Bash", "tool_input": {"command": "true"}}
+    res = run_hook("output-location-check.sh", payload, cwd=project)
+    assert res.returncode == 2 and "office/research/papers/a\\b.md → work/papers/a\\b.md" in res.stderr

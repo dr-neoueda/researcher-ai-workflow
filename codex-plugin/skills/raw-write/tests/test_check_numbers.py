@@ -879,6 +879,25 @@ def test_a_range_shares_the_exponent_of_its_right_end(text: str, expected: list[
     assert _values(text) == expected
 
 
+@pytest.mark.parametrize("text", ["(5 mg-10 mg) × 10^3", "(5 mM-10 mM) × 10^3", "(5 °C-10 °C) × 10^3"])
+def test_a_range_glued_to_the_same_unit_on_both_sides_takes_the_shared_power(text: str) -> None:
+    """python-reviewer（6 周目）M1: 英字にくっついたハイフンを単位の指数（L-1）としたため、「5 mg-10 mg」の左端 5 に
+    指数が当たらなくなった（a055df8 では当たっていた）。同じ単位がハイフンと数の両側にあれば範囲とする。
+    右端（mg-10 の 10）は前から単位の指数として読まない（ここでは左端だけを確かめる）。"""
+    assert _values(text)[:1] == ["5e3"]
+    assert _values(text, include_integers=True)[:1] == ["5e3"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("k = 2.1 s^-1 to 3.2 × 10^3 s^-1", ["2.1e0", "3.2e3"]), ("k = 2.1 s⁻¹ – 3.2 × 10³ s⁻¹", ["2.1e0", "3.2e3"]),
+    ("(5.1 kJ mol^-1 to 7.2 kJ mol^-1) × 10^3", ["5.1e3", "7.2e3"]), ("R^2 – 3 × 10^-3", ["3e-3"])])
+def test_a_range_does_not_revive_a_unit_power(text: str, expected: list[str]) -> None:
+    """r2 の直しの途中で見つけた（v2.4.1 から）: 範囲の左端が右端の指数を共有するとき、読まないと決めた上付きの整数
+    （s^-1 の 1・R^2 の 2）まで起こし、1×10³ や 0.002 という無い数を作っていた。読んだ数だけに指数を共有する。"""
+    assert _values(text) == expected
+    assert _values(text, include_integers=True) == expected
+
+
 @pytest.mark.parametrize("text,expected", [("0.1234-5-6", ["0.1234e0"]), ("(see [a](0.5/0.3))", ["0.5e0", "0.3e0"])])
 def test_noise_patterns_do_not_eat_decimals(text: str, expected: list[str]) -> None:
     assert _values(text)[: len(expected)] == expected
@@ -976,3 +995,235 @@ def test_spaced_ranges_share_the_exponent(text: str, expected: list[str]) -> Non
 @pytest.mark.parametrize("text", ["S1-3.2×10⁻³", "Run3-1.0×10⁻³"])
 def test_an_identifier_before_a_range_dash_gets_no_exponent(text: str) -> None:
     assert [v for v in _values(text) if v.startswith("1e") or v.startswith("3e")] == []
+
+
+# ---------- Codex の事後レビュー（2026-11-17）----------
+
+def _check(tmp_path: Path, draft: str, facts: str, *flags: str, draft_name: str = "draft.md",
+           facts_name: str = "facts.md") -> tuple[int, str]:
+    d, f = tmp_path / draft_name, tmp_path / facts_name
+    d.write_text(draft + "\n", encoding="utf-8")
+    f.write_text(facts + "\n", encoding="utf-8")
+    import contextlib
+    import io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        code = cn.main([str(d), "--facts", str(f), *flags])
+    return code, out.getvalue()
+
+
+@pytest.mark.parametrize("text", [r"$k = 1.2 \times 10^{- 3}$", "k = 1.2 × 10^{- 3}", "k = 1.2 × 10^ - 3"])
+def test_a_space_inside_the_exponent_is_still_read(text: str) -> None:
+    """Codex #69: 「10^{- 3}」の符号と数字の間の空白で指数を読まず、仮数 1.2 だけを照合して一致にしていた。"""
+    assert _values(text) == ["1.2e-3"]
+
+
+@pytest.mark.parametrize("text", ["ΔG = － 0.52 eV", "ΔG = －0.52 eV", "(－ 0.52)"])
+def test_a_full_width_minus_with_a_space_keeps_its_sign(text: str) -> None:
+    assert _values(text) == ["-0.52e0"]
+
+
+def test_a_quoted_csv_cell_with_a_thousands_comma_is_one_number(tmp_path: Path) -> None:
+    """Codex #69: CSV の引用符の中の「1,234.5」を 1 と 234.5 に割り、無い事実を作っていた。"""
+    p = tmp_path / "facts.csv"
+    p.write_text('mass,unit\n"1,234.5",mg\n', encoding="utf-8")
+    assert [str(n.value) for n in cn.read_numbers(p, include_integers=True)] == ["1234.5"]
+    code, _out = _check(tmp_path, "mass = 234.5 mg", 'mass,unit\n"1,234.5",mg', facts_name="facts.csv")
+    assert code == 1
+
+
+def test_a_thousands_comma_in_a_tsv_cell_is_one_number(tmp_path: Path) -> None:
+    p = tmp_path / "facts.tsv"
+    p.write_text("mass\tunit\n1,234.5\tmg\n", encoding="utf-8")
+    assert [str(n.value) for n in cn.read_numbers(p, include_integers=True)] == ["1234.5"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("体積 12mL", ["12e0"]), ("300K で", ["300e0"]), ("5mg", ["5e0"]), ("10min", ["10e0"]), ("2M HCl", ["2e0"]),
+    ("B3LYP/6-31G(d) で計算", []), ("13C NMR", []), ("3D 構造", []), ("化合物 1a と 2b", []),
+    ("化合物 3h と 2g", []), ("2m・2s", []),                  # 小文字 1 文字は化合物の番号（時間・質量は「2 h」と空ける）
+])
+def test_integers_with_a_unit_glued_on_are_read(text: str, expected: list[str]) -> None:
+    """Codex #69: --integers でも「12mL」の 12 を識別子として黙って捨て、誤った体積を照合しなかった。"""
+    assert _values(text, include_integers=True) == expected
+
+
+def test_integers_read_as_identifiers_are_listed(tmp_path: Path) -> None:
+    code, out = _check(tmp_path, "濃度 0.5、3D 構造", "濃度 0.5", "--integers")
+    assert code == 0 and "読まなかった整数" in out and "3D" in out
+
+
+def test_the_exponent_of_a_bare_power_of_ten_is_not_a_second_number() -> None:
+    """Codex #69: --integers で「10^{-3}」を 0.001 と読んだうえ、指数の -3 も別の数として数えていた。"""
+    assert _values(r"$k = 10^{-3}$", include_integers=True) == ["1e-3"]
+    assert _values("k = 10⁻³ と 5 個", include_integers=True) == ["1e-3", "5e0"]
+
+
+@pytest.mark.parametrize("text", ["k = (1.2 ± 0.1) × 10⁻³", r"$k = (1.2 \pm 0.1) \times 10^{-3}$"])
+def test_a_shared_power_of_ten_after_parentheses_applies_inside(text: str) -> None:
+    """Codex #69: 「(1.2 ± 0.1) × 10⁻³」の共通の指数を括弧の中に当てず、正しい値を不一致にしていた。"""
+    assert _values(text) == ["1.2e-3", "0.1e-3"]
+
+
+def test_parentheses_without_a_power_keep_their_numbers() -> None:
+    assert _values("k = (1.2 ± 0.1) s、10⁻³ M") == ["1.2e0", "0.1e0", "1e-3"]
+
+
+def test_rounding_uses_every_digit_of_the_fact(tmp_path: Path) -> None:
+    """Codex #69: Decimal の既定の精度（28 桁）で一覧の値を先に丸め、0.1499…9 を 0.2 に丸めて一致にしていた。"""
+    code, out = _check(tmp_path, "x = 0.2", "x = 0.14999999999999999999999999999")
+    assert code == 1 and "丸めて一致: 0" in out
+
+
+@pytest.mark.parametrize("skill", ["raw-write", "raw-slides"])
+@pytest.mark.parametrize("plugin", ["plugin", "codex-plugin"])
+def test_the_skills_say_what_to_do_when_a_draft_has_no_numbers(plugin: str, skill: str) -> None:
+    """Codex #69: 数の無い原稿は終了コード 2 なのに、SKILL は例外なく「終了コード 0 になってから」を求めていた。"""
+    root = Path(__file__).resolve().parents[4]
+    text = (root / plugin / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+    assert "数が 1 つも取れない" in text and "--integers" in text and "照合は要らない" in text
+
+
+# ---------- python-reviewer（v2.4.2 の 1 周目）----------
+
+def test_an_unclosed_quote_in_a_table_keeps_the_line_numbers(tmp_path: Path) -> None:
+    """MEDIUM: 閉じていない「"」が残りの全部の行を 1 つのセルに飲み込み、どの数も L1 と報告していた。"""
+    p = tmp_path / "facts.tsv"
+    p.write_text('a\t"3 mL\t5.5\nb\t7.25\nc\t8.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "5.5"), ("L2", "7.25"), ("L3", "8.5")]
+
+
+@pytest.mark.parametrize("text", ["y = 0,125", "| 0,125 |", "y = 1,25"])
+def test_a_possible_decimal_comma_is_not_read_as_numbers(text: str) -> None:
+    """MEDIUM: 「0,125」を桁区切りとして 125 と読んでいた。0 と 125 に割っても一覧の 125 と偽って一致しうるので、
+    小数点のカンマかもしれない書き方は数として読まない（原稿では（参考）に挙がる）。"""
+    assert _values(text, include_integers=True) == []
+
+
+def test_a_quoted_decimal_comma_in_a_csv_draft_is_reported(tmp_path: Path) -> None:
+    code, out = _check(tmp_path, 'name,value\nx,"0,52"\ny,31.44', "31.44", draft_name="draft.csv")
+    assert code == 0 and "小数点がカンマかもしれない" in out and "0,52" in out
+
+
+def test_a_huge_shared_exponent_after_parentheses_does_not_stop_the_check() -> None:
+    """LOW: 桁外れの共通の指数で int() が ValueError を上げ、原稿全体を「読めません」にしていた。"""
+    nums = cn.extract_numbers("(1.2 ± 0.1) × 10^" + "9" * 5000, location="L1")
+    assert [(str(n.mantissa), n.unreadable) for n in nums] == [("1.2", False), ("0.1", False), ("1", True)]
+
+
+def test_an_inner_exponent_is_not_overridden_or_dropped_by_an_outer_one() -> None:
+    """LOW: 「(1.2×10^3) × 10^2」で外の 10^2 を黙って捨てていた。共有せず、外の 10^2 も数として残す（一覧に無ければ挙がる）。"""
+    assert _values("(1.2×10^3) × 10^2") == ["1.2e3", "1e2"]
+
+
+# ---------- python-reviewer（v2.4.2 の 2 周目）----------
+
+@pytest.mark.parametrize("text,expected", [("values 5,10.5 mol", ["10.5e0"]), ("N = 12,5.5", ["5.5e0"])])
+def test_a_comma_before_a_decimal_point_is_not_cut_in_the_middle(text: str, expected: list[str]) -> None:
+    """MEDIUM: 「5,10.5」の「5,10」を小数点のカンマとして消し、残った「.5」を 0.5 と読んでいた。"""
+    assert _values(text) == expected
+
+
+@pytest.mark.parametrize("text", ["T = 1,5 × 10^3 K", "k = 2,5e-3", "k = 2,5 × 10⁻³"])
+def test_the_power_of_ten_after_a_decimal_comma_is_not_left_alone(text: str) -> None:
+    """LOW: 「1,5 × 10^3」の係数だけを消し、10^3（= 1000）だけを読んで一覧の 1000 と偽って一致しえた。"""
+    assert _values(text, include_integers=True) == []
+
+
+def test_one_broken_csv_row_does_not_break_the_quoted_cells_of_other_rows(tmp_path: Path) -> None:
+    """MEDIUM: 閉じていない引用符などで csv が失敗したとき、全部の行を区切りで割り、正しい行の "1,234.5" を壊していた。"""
+    p = tmp_path / "facts.csv"
+    p.write_text('x,"1,234.5",0.5\ny,"abc"d,2.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "1234.5"), ("L1", "0.5"), ("L2", "2.5")]
+
+
+# ---------- Codex の確かめの周（2026-11-17、v2.4.2）----------
+
+@pytest.mark.parametrize("text", ["k = (1.2 ± 1) × 10⁻³", r"$k = (1.2 \pm 1) \times 10^{-3}$"])
+def test_an_integer_inside_parentheses_takes_the_shared_power(text: str) -> None:
+    """Codex v2.4.2 #3: 括弧の中の整数（± 1）を、共通の指数を当てる前に「整数」として捨て、誤差が 10 倍違っても一致にしていた。"""
+    assert _values(text) == ["1.2e-3", "1e-3"]
+
+
+def test_a_wrong_uncertainty_inside_parentheses_is_reported(tmp_path: Path) -> None:
+    code, out = _check(tmp_path, "k = (5.2 ± 1) × 10⁻³", "k = 0.0052\n誤差 = 0.0001")   # 誤差を 10 倍に書き違えた
+    assert code == 1 and "1×10^-3  ← 0.0001" in out and "そのまま一致: 1" in out
+
+
+def test_plain_integers_are_still_left_out_without_the_integers_flag() -> None:
+    assert _values("3 回測った（12 個）") == []
+    assert _values("(3 ± 1) 回") == []
+
+
+def test_one_broken_csv_row_does_not_split_a_multiline_cell_elsewhere(tmp_path: Path) -> None:
+    """Codex v2.4.2 #4: 壊れた行が 1 つあると全部の物理行を 1 行ずつ読み直し、正しく読めていた複数行のセル
+    "mass\\n1,234.5" を 1 と 234.5 に割っていた（誤った原稿の 234.5 が一致した）。"""
+    p = tmp_path / "facts.csv"
+    p.write_text('"mass\n1,234.5",mg\ny,"oops"x,0.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p, True)] == [("L1", "1234.5"), ("L3", "0.5")]
+    code, _out = _check(tmp_path, "mass = 234.5 mg", '"mass\n1,234.5",mg\ny,"oops"x,0.5', facts_name="facts.csv")
+    assert code == 1
+
+
+def test_rows_after_a_broken_row_keep_their_line_numbers(tmp_path: Path) -> None:
+    p = tmp_path / "facts.csv"
+    p.write_text('a,1.5\nb,"x"y,2.5\n"c\nd",3.5\ne,4.5\n', encoding="utf-8")
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [
+        ("L1", "1.5"), ("L2", "2.5"), ("L3", "3.5"), ("L5", "4.5")]
+
+
+def test_a_power_of_ten_with_exponent_zero_is_not_dropped_as_an_integer() -> None:
+    assert _values("k = 10^{0} M") == ["1e0"]
+
+
+def test_every_line_of_a_broken_multiline_record_is_read_again(tmp_path: Path) -> None:
+    p = tmp_path / "facts.csv"
+    p.write_text('"p 7.5\nq"r,1.5\ns,2.5\n', encoding="utf-8")       # 1〜2 行目の記録が壊れている
+    assert [(n.location, str(n.value)) for n in cn.read_numbers(p)] == [("L1", "7.5"), ("L2", "1.5"), ("L3", "2.5")]
+
+
+@pytest.mark.parametrize("text", ["(n = 3; k = 1.2 ± 0.1) × 10⁻³", "(5 mg, 1.2 ± 0.1) × 10⁻³",
+                                  "(1.2 ± 0.1 for 3 runs) × 10⁻³"])
+def test_a_count_or_label_inside_parentheses_does_not_take_the_shared_power(text: str) -> None:
+    """python-reviewer（3 周目）M1: 括弧の中の件数・ラベル・単位の付いた整数（n = 3・5 mg）にも共通の指数を当て、
+    3×10⁻³ のような無い数を作って既定の実行を「一覧に無い」で落としていた。± や範囲でつながる整数だけに当てる。"""
+    assert _values(text) == ["1.2e-3", "0.1e-3"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("(5 ± 2) × 10⁻³", ["5e-3", "2e-3"]), ("(1–3) × 10⁻³", ["1e-3", "3e-3"]), ("(1 to 3) × 10⁻³", ["1e-3", "3e-3"]),
+    (r"$(1.2 \pm 1) \times 10^{-3}$", ["1.2e-3", "1e-3"]),
+    # python-reviewer（4 周目）M2・M3: ± の書き方（+/-・+-）・± の後の符号・数と ± や範囲の間の単位も「つながる」に数える
+    ("(5 +/- 2) × 10^3", ["5e3", "2e3"]), ("(5 +- 2) × 10^3", ["5e3", "2e3"]), ("(5 ± -2) × 10^3", ["5e3", "-2e3"]),
+    ("(5 mg ± 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 − 2) × 10^3", ["5e3", "2e3"]),
+    ("(5 mg +/- 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 mg ± -2 mg) × 10^3", ["5e3", "-2e3"]),
+    # python-reviewer（5 周目）M3: 単位を挟む範囲は両側とも
+    ("(5 mg - 2 mg) × 10^3", ["5e3", "2e3"]), ("(5 mg ~ 8 mg) × 10^3", ["5e3", "8e3"]), ("(5 mg to 6 mg) × 10^3", ["5e3", "6e3"]),
+    # Codex（確かめの周 r2）P2: 組み立てた単位（mg/mL・mg mL⁻¹・mol L-1・mol·L⁻¹・g cm⁻³・m²）を挟んでもつながる
+    ("(5 mg/mL ± 2 mg/mL) × 10^-3", ["5e-3", "2e-3"]), ("(5 mg mL⁻¹ ± 2 mg mL⁻¹) × 10^-3", ["5e-3", "2e-3"]),
+    ("(5 mol L-1 ± 2 mol L-1) × 10^-3", ["5e-3", "2e-3"]), ("(5 mol·L⁻¹ ± 2 mol·L⁻¹) × 10^-3", ["5e-3", "2e-3"]),
+    ("(5 g cm⁻³ ± 2 g cm⁻³) × 10^-3", ["5e-3", "2e-3"]), ("(5 m² ± 2 m²) × 10^-3", ["5e-3", "2e-3"]),
+    ("(5 kJ/mol – 7 kJ/mol) × 10^3", ["5e3", "7e3"]),
+    ("(5 kJ mol^-1 to 7 kJ mol^-1) × 10^3", ["5e3", "7e3"]), ("(5 µg/mL ~ 7 µg/mL) × 10^3", ["5e3", "7e3"])])
+def test_integers_joined_by_a_plus_minus_or_a_range_take_the_shared_power(text: str, expected: list[str]) -> None:
+    assert _values(text) == expected
+    assert _values(text, include_integers=True) == expected
+
+
+def test_a_count_alone_in_parentheses_before_a_power_stays_an_integer() -> None:
+    assert _values("k = 1.5 (n = 3) × 10⁻³") == ["1.5e0"]
+    assert _values("k = 1.5 (n = 3) × 10⁻³", include_integers=True) == ["1.5e0", "3e0"]
+
+
+
+@pytest.mark.parametrize("text", [
+    "V = 1.2345(6) × 10^3 Å^3", "ρ = 1.234(5) × 10⁻³ g cm⁻³", "k = 3.2(1) × 10^-3 s^-1",    # 結晶学の標準不確かさの書き方
+    "(試料 3 回) × 10^3", "(α = 3) × 10^3", "(3σ, 5) × 10^3", "(2023) × 10^3", "yield (85) × 10^-2",
+    "(2) × 10³", "(1, 2, 3) × 10⁻³", "(1 and 2) × 10^3", "(12 mg and 3 runs) × 10^3",
+    # r2 で単位を組み立てたものに広げた後も、カンマ・and・= を挟めば件数のまま
+    "(12 mg/mL and 3 runs) × 10^3", "(n = 3 mg/mL, 1.2 ± 0.1) × 10⁻³", "(3 mol L-1, 2 g cm⁻³) × 10^3",
+    "(3 mol L-1 s-1, 2 runs) × 10^3", "(3 L-1 s-1, 2 runs) × 10^3"])
+def test_an_integer_not_joined_by_a_plus_minus_or_a_range_does_not_take_the_shared_power(text: str) -> None:
+    """python-reviewer（5 周目）M1・M2: 4 周目の「語の無い括弧ならどの整数にも当てる」が、1.2345(6) × 10³ の (6) に当たって
+    6×10³ という無い数を作り、日本語・ギリシャ文字の語も「語なし」と数えていた。± や範囲でつながる整数だけに当てる。"""
+    assert not [n for n in cn.extract_numbers(text, location="L1") if n.exponent != 0 and n.decimals == 0]

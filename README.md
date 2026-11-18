@@ -2,7 +2,7 @@
 
 > **研究者のための AI エージェント導入伴走** — 電気通信大学 SPRING リカレント・リスキリング商品
 
-**配布版：plugin 2.4.1 / Codex 2.4.1 / Copilot 1.46.0（保留中・旧名 caw）/ Gemini 1.49.0（凍結）**
+**配布版：plugin 2.4.2 / Codex 2.4.2 / Copilot 1.46.0（保留中・旧名 caw）/ Gemini 1.49.0（凍結）**
 現状と次の一手は [`RESUME.md`](./RESUME.md)、変更の全履歴は [`CHANGELOG.md`](./CHANGELOG.md) を参照。
 
 > **プラグイン `raw` は無料です。** 商品はプラグインそのものではなく、研究者が自分の研究に合わせて

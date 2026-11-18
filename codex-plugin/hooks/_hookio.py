@@ -23,6 +23,7 @@ from typing import Any, Iterator
 
 SHELL_TOOLS = ("Bash", "shell", "local_shell", "exec_command")  # シェルの道具（Claude Code・Codex）
 RECENT_SECONDS = 120  # シェルで書いたファイルを拾う窓（秒）。前からある置き違いでは毎回警告しない
+CLOCK_SLACK_SECONDS = 300  # これより先の時刻のファイルは「先の日付」とみなして数えない（時計の進んだ共有ドライブの数分は数える）
 PATCH_HEADER = re.compile(r"^\*\*\* (Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 
 
@@ -57,15 +58,18 @@ def _strings(value: Any) -> Iterator[str]:
 
 
 def _patch_targets(text: str) -> list[str]:
-    """apply_patch のパッチで書き込んだファイル。削除は違反ではないので数えない。
-    「Update File: 元」の直後の「Move to: 先」は移動なので、元は書き込み先から外して先だけを数える。"""
+    """apply_patch のパッチで書き込んだファイル。削除は違反ではないので数えない（同じパッチで先に足したものも外す）。
+    「Update File: 元」の直後の「Move to: 先」は移動なので、元は書き込み先から外して先だけを数える。
+    引用符は外さない（Codex 0.167 の apply_patch は引用符も名前の一部として書く。実機で確かめた）。"""
     targets: list[str] = []
     previous = ""
     for match in PATCH_HEADER.finditer(text):
-        kind, path = match.group(1), match.group(2).strip("\"'")
+        kind, path = match.group(1), match.group(2)
         if kind == "Move to" and previous == "Update File" and targets:
             targets[-1] = path
-        elif kind != "Delete File":
+        elif kind == "Delete File":
+            targets = [target for target in targets if target != path]
+        else:
             targets.append(path)
         previous = kind
     return targets
@@ -76,9 +80,16 @@ def recent_office_files(root: Path, now: float | None = None, places: list[str] 
     mv・cp -p は更新時刻を古いまま保つので、状態の変更時刻（ctime。移したときに変わる）も見る。ctime は chmod・
     拡張属性・同期ソフトでも変わるので、旧い置き場所に前からあるファイルを 120 秒の間くり返し警告することがある
     （置き違いには違いないので許す）。Windows の st_ctime は作成時刻（コピーは拾い、属性の変更は拾わない）。
-    道具の入力から書き込み先が分からないときの拾い方なので、取りこぼしはありうる（長いコマンドの初めに書いたもの等）。"""
+    道具の入力から書き込み先が分からないときの拾い方なので、取りこぼしはありうる（長いコマンドの初めに書いたもの等）。
+    いまより先の時刻（時計の進んだ機械から時刻ごと写したもの）は、いつ変わったか分からないので数えない。
+    旧い置き場所が work/ へのリンクなら、中身の本当の場所は office/ の外なので数えない。"""
+    current = time.time() if now is None else now
+    cutoff = current - RECENT_SECONDS
     bases = [root / place for place in places] if places is not None else [root / "office"]
-    cutoff = (time.time() if now is None else now) - RECENT_SECONDS
+    try:
+        office = (root / "office").resolve()
+    except (OSError, RuntimeError):
+        return []
     found: set[str] = set()
     for base in bases:
         if not base.is_dir():
@@ -86,9 +97,12 @@ def recent_office_files(root: Path, now: float | None = None, places: list[str] 
         for path in base.rglob("*"):
             try:
                 info = path.stat()
-                if path.is_file() and max(info.st_mtime, info.st_ctime) >= cutoff:
-                    found.add(path.relative_to(root).as_posix())
-            except (OSError, ValueError):
+                stamps = [t for t in (info.st_mtime, info.st_ctime) if t <= current + CLOCK_SLACK_SECONDS]
+                if not path.is_file() or not stamps or max(stamps) < cutoff:
+                    continue
+                path.resolve().relative_to(office)   # office/ の外（work/ へのリンクの先）なら ValueError で飛ばす
+                found.add(path.relative_to(root).as_posix())
+            except (OSError, ValueError, RuntimeError):
                 continue
     return sorted(found)
 
@@ -119,11 +133,17 @@ def edited_paths(data: dict[str, Any], root: Path) -> list[str]:
 
 
 def _utf8_stdio() -> None:
-    """日本語の Windows（cp932）でも、UTF-8 の JSON を読み、UTF-8 で書く。入力の先頭の BOM は読み飛ばす。"""
-    for stream, encoding in ((sys.stdin, "utf-8-sig"), (sys.stdout, "utf-8")):
+    """日本語の Windows（cp932）でも、UTF-8 の JSON を読み、UTF-8 で書く。入力の先頭の BOM は読み飛ばす。
+    改行は LF に固定する（Windows の Python は CRLF で書き、bash の $(…) は LF しか外さないのでパスに CR が残る）。"""
+    for stream, options in ((sys.stdin, {"encoding": "utf-8-sig"}), (sys.stdout, {"encoding": "utf-8", "newline": "\n"})):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
-            reconfigure(encoding=encoding, errors="replace")
+            reconfigure(errors="replace", **options)
+
+
+def _one_line(path: str) -> str:
+    """1 行に 1 つのパスで渡すので、名前の中の改行は \\n と書いて見せる（行が途中で切れないように）。"""
+    return path.replace("\n", "\\n").replace("\r", "\\r")
 
 
 def main(argv: list[str]) -> int:
@@ -141,7 +161,7 @@ def main(argv: list[str]) -> int:
     if argv[1] == "project":
         print(root)
     else:
-        print("\n".join(edited_paths(data, root)))
+        print("\n".join(_one_line(path) for path in edited_paths(data, root)))
     return 0
 
 

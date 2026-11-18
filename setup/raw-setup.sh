@@ -179,11 +179,14 @@ if [ $need_brew -eq 1 ] && ! have brew; then
 fi
 
 # --- 必須ツール -------------------------------------------------------------
-section "必須ツールのインストール"
-for entry in "${plan_req[@]}"; do
-  IFS='|' read -r name chk inst <<<"$entry"
-  if have brew; then run "$name" bash -c "$inst"; else skip "${name}（brew 未導入のため）"; fi
-done
+# 空の配列の "${a[@]}" は bash 3.2 の set -u で unbound variable になる。展開の前に数で確かめる
+if [ ${#plan_req[@]} -gt 0 ]; then
+  section "必須ツールのインストール"
+  for entry in "${plan_req[@]}"; do
+    IFS='|' read -r name chk inst <<<"$entry"
+    if have brew; then run "$name" bash -c "$inst"; else skip "${name}（brew 未導入のため）"; fi
+  done
+fi
 
 # --- Claude Code ------------------------------------------------------------
 if [ $claude_plan -eq 1 ]; then
